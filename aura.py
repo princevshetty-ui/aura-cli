@@ -10,49 +10,44 @@ import os
 import re
 import subprocess
 import shutil
+from rich.console import Console
+from rich.panel import Panel
+from rich.table import Table
+from rich.layout import Layout
+from rich.text import Text
+from rich.spinner import Spinner
+from rich.live import Live
+import time
+
+# Initialize Rich console for modern output with forced color support
+console = Console(force_terminal=True, force_interactive=True)
 
 
-class Colors:
-    """ANSI color codes for terminal styling."""
-    RESET = '\033[0m'
-    BOLD = '\033[1m'
-    
-    # Colors
-    RED = '\033[91m'
-    GREEN = '\033[92m'
-    YELLOW = '\033[93m'
-    BLUE = '\033[94m'
-    MAGENTA = '\033[95m'
-    CYAN = '\033[96m'
+def display_header():
+    """Display the AURA CLI header with bold purple styling and animation."""
+    # Animated header with initialization animation
+    with console.status("[bold magenta]✨ Initializing Aura...[/bold magenta]", spinner="dots"):
+        time.sleep(0.5)
+    header_text = Text("✨ AURA CLI ✨", style="bold magenta", justify="center")
+    panel = Panel(header_text, border_style="magenta", padding=(0, 2), expand=False)
+    console.print(panel)
 
 
-def colorize(text, color):
-    """Apply color to text if terminal supports it."""
+def check_copilot_auth():
+    """
+    Check if user is authenticated with Copilot CLI.
+    Returns True if authenticated, False otherwise.
+    """
     try:
-        return f"{color}{text}{Colors.RESET}"
-    except Exception:
-        return text
-
-
-def print_styled_message(emoji, title, message, color):
-    """Print a stylized message with emoji, title, and color."""
-    styled_title = colorize(title, color + Colors.BOLD)
-    styled_message = colorize(message, color)
-    print(f"\n{emoji} {styled_title}")
-    print(f"   {styled_message}\n")
-
-
-def print_ai_box(text):
-    lines = text.split('\n')
-    width = min(max(len(line) for line in lines), 80)  # Limit width to 80 chars
-    
-    print("\n" + "┌" + "─" * (width + 2) + "┐")
-    print("│ " + "AURA AI ADVICE".center(width) + " │")
-    print("├" + "─" * (width + 2) + "┤")
-    for line in lines:
-        # Wrap long lines if necessary or just print them
-        print(f"│ {line.ljust(width)} │")
-    print("└" + "─" * (width + 2) + "┘\n")
+        result = subprocess.run(
+            ["copilot", "-i", "/login"],
+            capture_output=True,
+            text=True,
+            timeout=5
+        )
+        return result.returncode == 0
+    except (FileNotFoundError, subprocess.TimeoutExpired, Exception):
+        return False
 
 
 def scan_secrets():
@@ -115,114 +110,93 @@ def scan_secrets():
 
 def cmd_check(args):
     """Security check subcommand."""
-    print_styled_message(
-        "🛡️ ",
-        "Aura Security",
-        "Security Scan Started...",
-        Colors.RED
-    )
+    console.print(Panel("[bold magenta]🛡️  Aura Security[/bold magenta]", border_style="magenta", padding=(0, 2)))
     
-    secrets_found, env_issues, remediation_prompt = scan_secrets()
+    # Pre-flight check: Verify Copilot CLI authentication
+    if not check_copilot_auth():
+        console.print("[bold red]⚠️  Aura needs your help![/bold red]")
+        console.print("Please run [bold cyan]copilot /login[/bold cyan] to activate my AI core.\n")
+        return
+    
+    # Animated scanning
+    with console.status("[bold cyan]Scanning for security threats...[/bold cyan]", spinner="dots"):
+        secrets_found, env_issues, remediation_prompt = scan_secrets()
+    console.print()  # Add blank line after scan completes
     
     if secrets_found:
-        print(f"⚠️  {Colors.RED}{Colors.BOLD}Found {len(secrets_found)} potential secret(s):{Colors.RESET}")
+        # Create a Rich Table for secrets findings
+        table = Table(title="[bold red]Security Findings[/bold red]", border_style="red")
+        table.add_column("File Name", style="cyan")
+        table.add_column("Secret Type", style="yellow")
+        table.add_column("Action", style="magenta")
+        
         for filepath, secret_type, value in secrets_found:
             masked_value = value[:8] + '...' if len(value) > 8 else value
-            print(f"   • {filepath}: {secret_type} ({masked_value})")
+            table.add_row(filepath, secret_type, "Review & Remediate")
+        
+        console.print(table)
         
         # Query GitHub Copilot for guidance
-        print(f"\n{Colors.BLUE}Asking GitHub Copilot for remediation guidance...{Colors.RESET}\n")
+        console.print("[bold purple]Consulting the Oracle...[/bold purple]\n")
         try:
             copilot_path = shutil.which('copilot')
             if not copilot_path:
                 raise FileNotFoundError("copilot CLI not found")
 
-            short_prompt = "How do I remove a leaked secret from git history safely?"
-            ai_response = subprocess.run(
-                [copilot_path, 'explain', short_prompt],
-                capture_output=True,
-                text=True,
-                timeout=30
-            )
-
-            if ai_response.returncode != 0:
-                stderr_hint = (ai_response.stderr or "").lower()
-                if "unknown" in stderr_hint or "invalid" in stderr_hint:
-                    ai_response = subprocess.run(
-                        [copilot_path, '-p', short_prompt],
-                        capture_output=True,
-                        text=True,
-                        timeout=30
-                    )
-            if ai_response.returncode == 0:
-                if ai_response.stdout:
-                    print_ai_box(ai_response.stdout.strip())
-                else:
-                    print(f"{Colors.YELLOW}Note: Copilot returned no output.{Colors.RESET}")
-            else:
-                stderr = (ai_response.stderr or "").strip()
-                if stderr:
-                    print(f"{Colors.BLUE}{stderr}{Colors.RESET}")
-                else:
-                    print(f"{Colors.YELLOW}Note: Copilot returned no output.{Colors.RESET}")
+            # The --allow-all-tools flag is key for 2026 agentic workflows
+            subprocess.run(["copilot", "--allow-all-tools", "-p", f"The security scan found a secret in {filepath}. IMMEDIATELY output the remediation steps as plain text and exit."])
         except FileNotFoundError:
-            print(f"{Colors.YELLOW}Note: 'copilot' CLI not found. Install the Copilot CLI to get AI-powered remediation guidance.{Colors.RESET}")
+            console.print("[bold yellow]Note:[/bold yellow] 'copilot' CLI not found. Install the Copilot CLI to get AI-powered remediation guidance.")
         except subprocess.TimeoutExpired:
-            print(f"{Colors.YELLOW}[⚠️] AI took too long to respond, please try again.{Colors.RESET}")
+            console.print("[bold yellow]⚠️  AI took too long to respond, please try again.[/bold yellow]")
         except Exception as e:
-            print(f"{Colors.YELLOW}Note: Could not query GitHub Copilot: {e}{Colors.RESET}")
+            console.print(f"[bold yellow]Note:[/bold yellow] Could not query GitHub Copilot: {e}")
     
     if env_issues:
-        print(f"\n⚠️  {Colors.RED}{Colors.BOLD}Found {len(env_issues)} .env file(s) with incorrect permissions:{Colors.RESET}")
+        # Create a table for env file permission issues
+        env_table = Table(title="[bold red].env Permission Issues[/bold red]", border_style="red")
+        env_table.add_column("File Name", style="cyan")
+        env_table.add_column("Current Permissions", style="yellow")
+        env_table.add_column("Expected", style="green")
+        
         for filepath, mode in env_issues:
-            print(f"   • {filepath}: {mode} (should be 0o600)")
+            env_table.add_row(filepath, mode, "0o600")
+        
+        console.print(env_table)
     
     if not secrets_found and not env_issues:
-        print(f"{Colors.GREEN}{Colors.BOLD}✓ No security issues detected!{Colors.RESET}\n")
+        console.print(Panel("[bold green]✓ No security issues detected![/bold green]", border_style="green"))
 
 
 def cmd_pulse(args):
     """Code health pulse subcommand."""
-    print_styled_message(
-        "💓",
-        "Aura Pulse",
-        "Code Health Analysis Started...",
-        Colors.GREEN
-    )
+    console.print(Panel("[bold green]💓 Aura Pulse[/bold green]", border_style="green"))
+    console.print("[bold green]Code Health Analysis Started...[/bold green]")
 
 
 def cmd_story(args):
     """Code story/documentation subcommand."""
-    print_styled_message(
-        "📖",
-        "Aura Story",
-        "Code Story Generation Started...",
-        Colors.BLUE
-    )
+    console.print(Panel("[bold blue]📖 Aura Story[/bold blue]", border_style="blue"))
+    console.print("[bold blue]Code Story Generation Started...[/bold blue]")
 
 
 def cmd_eco(args):
     """Ecosystem analysis subcommand."""
-    print_styled_message(
-        "🌍",
-        "Aura Eco",
-        "Dependency Ecosystem Analysis Started...",
-        Colors.CYAN
-    )
+    console.print(Panel("[bold cyan]🌍 Aura Eco[/bold cyan]", border_style="cyan"))
+    console.print("[bold cyan]Dependency Ecosystem Analysis Started...[/bold cyan]")
 
 
 def cmd_fly(args):
     """Performance flight check subcommand."""
-    print_styled_message(
-        "🚀",
-        "Aura Fly",
-        "Performance Analysis Started...",
-        Colors.MAGENTA
-    )
+    console.print(Panel("[bold magenta]🚀 Aura Fly[/bold magenta]", border_style="magenta"))
+    console.print("[bold magenta]Performance Analysis Started...[/bold magenta]")
 
 
 def main():
     """Main CLI entry point with argparse setup."""
+    # Display header
+    display_header()
+    
     parser = argparse.ArgumentParser(
         prog='aura',
         description='Aura - Intelligent CLI tool for development insights',

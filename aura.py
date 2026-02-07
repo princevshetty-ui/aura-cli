@@ -221,6 +221,161 @@ def render_activity_histogram(mtimes, now, hours=6, buckets=6, width=24):
     return lines
 
 
+def play_sound(kind: str = "bell"):
+    """Try to play a simple notification sound.
+
+    Fallbacks (in order): terminal bell, paplay/aplay/spd-say where available.
+    This is best-effort and never raises.
+    """
+    try:
+        # Terminal bell (works in many terminals)
+        print('\a', end='', flush=True)
+    except Exception:
+        pass
+
+
+def parse_idle_field_to_minutes(field: str) -> float:
+    """Parse idle time field from `w`/`who` into minutes.
+
+    Handles formats like '.', 'old', '0.00s', '1.23m', 'MM:SS' or 'HH:MM'.
+    Returns minutes as float or None if unparsable.
+    """
+    if not field or field.strip() in (".", "", "?"):
+        return 0.0
+    f = field.strip()
+    if f == 'old':
+        return 24 * 60.0
+    # seconds
+    if f.endswith('s'):
+        try:
+            return float(f[:-1]) / 60.0
+        except Exception:
+            return None
+    # minutes
+    if f.endswith('m'):
+        try:
+            return float(f[:-1])
+        except Exception:
+            return None
+    # colon separated, could be mm:ss or hh:mm
+    if ':' in f:
+        parts = f.split(':')
+        try:
+            if len(parts) == 2:
+                a, b = int(parts[0]), int(parts[1])
+                # heuristics: if a < 10 assume minutes:seconds, else hours:minutes
+                if a < 10:
+                    return a + b / 60.0
+                return a * 60 + b
+        except Exception:
+            return None
+    # plain number -> minutes
+    try:
+        return float(f)
+    except Exception:
+        return None
+
+
+def get_terminal_idle_minutes() -> float | None:
+    """Try to determine the idle minutes for the current terminal session.
+
+    Returns minutes as float, or None if it cannot be determined.
+    """
+    # Try to get tty name
+    try:
+        tty = os.ttyname(sys.stdin.fileno())
+    except Exception:
+        tty = None
+
+    # Try `w -hs` first (more standardized)
+    try:
+        w_out = subprocess.run(['w', '-hs'], capture_output=True, text=True, timeout=1)
+        if w_out.returncode == 0 and w_out.stdout:
+            lines = [l for l in w_out.stdout.splitlines() if l.strip()]
+            for line in lines:
+                parts = line.split()
+                # USER TTY FROM LOGIN@ IDLE JCPU PCPU WHAT
+                if len(parts) >= 5:
+                    user = parts[0]
+                    tty_field = parts[1]
+                    idle_field = parts[4]
+                    if tty and tty_field in tty:
+                        m = parse_idle_field_to_minutes(idle_field)
+                        if m is not None:
+                            return m
+            # fallback: try to find any line for current user
+            cur_user = os.getenv('USER') or os.getlogin()
+            for line in lines:
+                parts = line.split()
+                if parts and parts[0] == cur_user and len(parts) >= 5:
+                    m = parse_idle_field_to_minutes(parts[4])
+                    if m is not None:
+                        return m
+    except Exception:
+        pass
+
+    # Try `who -u` as fallback
+    try:
+        who_out = subprocess.run(['who', '-u'], capture_output=True, text=True, timeout=1)
+        if who_out.returncode == 0 and who_out.stdout:
+            lines = [l for l in who_out.stdout.splitlines() if l.strip()]
+            for line in lines:
+                parts = line.split()
+                # USER TTY  ... IDLE
+                if len(parts) >= 6:
+                    tty_field = parts[1]
+                    idle_field = parts[5]
+                    if tty and tty_field in tty:
+                        m = parse_idle_field_to_minutes(idle_field)
+                        if m is not None:
+                            return m
+            # fallback: try matching current user
+            cur_user = os.getenv('USER') or os.getlogin()
+            for line in lines:
+                parts = line.split()
+                if parts and parts[0] == cur_user and len(parts) >= 6:
+                    m = parse_idle_field_to_minutes(parts[5])
+                    if m is not None:
+                        return m
+    except Exception:
+        pass
+
+    return None
+
+    # Try system players if available
+    try:
+        # prefer paplay (PulseAudio)
+        paplay = shutil.which('paplay')
+        if paplay:
+            # common freedesktop sounds
+            candidates = [
+                '/usr/share/sounds/freedesktop/stereo/complete.oga',
+                '/usr/share/sounds/freedesktop/stereo/phone-incoming-call.oga',
+            ]
+            for c in candidates:
+                if os.path.exists(c):
+                    subprocess.run([paplay, c], timeout=3)
+                    return
+
+        aplay = shutil.which('aplay')
+        if aplay:
+            # try a common wav (rare), fallback to bell
+            candidates = ['/usr/share/sounds/alsa/Front_Center.wav']
+            for c in candidates:
+                if os.path.exists(c):
+                    subprocess.run([aplay, c], timeout=3)
+                    return
+
+        # As a last resort, use spd-say to speak a short phrase
+        spd = shutil.which('spd-say')
+        if spd:
+            phrase = 'Time for a short break' if kind != 'bell' else 'Bell'
+            subprocess.run([spd, phrase], timeout=3)
+            return
+    except Exception:
+        pass
+
+
 def animate_flame(duration: float = 1.0, refresh: int = 8, loop: bool = False, enabled: bool = True):
     """Render a brief flame animation using Rich Live. Non-blocking-ish and
     transient so it feels like a tasteful visual flourish for FLOW state.
@@ -242,11 +397,39 @@ def animate_flame(duration: float = 1.0, refresh: int = 8, loop: bool = False, e
     with Live(refresh_per_second=refresh, transient=True) as live:
         if loop:
             end = time.time() + duration
-            while time.time() < end:
-                for frame in frames:
-                    panel = Panel(Align(frame, vertical="middle"), border_style="bright_red", title="FLOW")
-                    live.update(panel)
-                    time.sleep(max(0.02, duration / (len(frames) * 4)))
+            # Loop until duration expires or until a keypress (if stdin is a tty)
+            end = time.time() + duration
+            try:
+                # set up non-blocking key detection
+                import termios
+                import tty
+                import select
+
+                fd = sys.stdin.fileno()
+                old_settings = termios.tcgetattr(fd)
+                try:
+                    tty.setcbreak(fd)
+                    while time.time() < end:
+                        for frame in frames:
+                            panel = Panel(Align(frame, vertical="middle"), border_style="bright_red", title="FLOW")
+                            live.update(panel)
+                            # check for keypress
+                            if select.select([sys.stdin], [], [], duration / (len(frames) * 4))[0]:
+                                _ = sys.stdin.read(1)
+                                return
+                            time.sleep(max(0.02, duration / (len(frames) * 4)))
+                finally:
+                    try:
+                        termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+                    except Exception:
+                        pass
+            except Exception:
+                # Fallback: loop until time expires without key detection
+                while time.time() < end:
+                    for frame in frames:
+                        panel = Panel(Align(frame, vertical="middle"), border_style="bright_red", title="FLOW")
+                        live.update(panel)
+                        time.sleep(max(0.02, duration / (len(frames) * 4)))
         else:
             for frame in frames:
                 panel = Panel(Align(frame, vertical="middle"), border_style="bright_red", title="FLOW")
@@ -261,7 +444,8 @@ def cmd_check(args):
     # Pre-flight check: Verify Copilot CLI authentication
     if not check_copilot_auth():
         console.print("[bold red]⚠️  Aura needs your help![/bold red]")
-        console.print("Please run [bold cyan]Copilot -i /login[/bold cyan] to activate my AI core.\n")
+        console.print("Please run [bold cyan]copilot -i /login[/bold cyan] to authenticate the Copilot agent.\n")
+        console.print("Important: after running [bold cyan]copilot -i /login[/bold cyan], open a new terminal to run Aura commands. The Copilot login opens an agent that may occupy the current terminal and prevent Aura output from appearing in the same session.")
         return
 
     # Make scan feel more alive: brief live intro, then run scan with progress
@@ -465,48 +649,76 @@ def cmd_pulse(args):
 
     console.print(Columns([left, right], expand=True))
 
-    # Status / Call-to-action
+    # Determine idle state: check both file mtime and terminal idle
+    idle_threshold = float(getattr(args, 'idle', 15))
+    terminal_idle = get_terminal_idle_minutes()
+    idle_by_files = minutes_since > idle_threshold
+    idle_by_terminal = (terminal_idle is not None and terminal_idle > idle_threshold)
+    idle_by_force = getattr(args, 'force_zen', False)
+    is_idle = idle_by_files or idle_by_terminal or idle_by_force
+
+    # Build status message based on ACTUAL developer activity (minutes_since file edits)
     status_text = Text()
     if minutes_since < 5:
+        # FLOW: very recent activity (within 5 minutes) — show "In flow" only when truly active
         status_text.append("In flow — keep going!", style="bold bright_green")
         # tasteful looping flame animation for Flow (short loop). Skip in compact mode.
         if not getattr(args, 'compact', False):
             try:
-                celebrate = getattr(args, 'celebrate', False)
-                # default loop a short time for Flow; celebrate extends it
-                if celebrate:
-                    animate_flame(duration=8.0, loop=True, enabled=True)
-                else:
-                    animate_flame(duration=3.0, loop=True, enabled=True)
+                animate_flame(duration=3.0, loop=True, enabled=True)
             except Exception:
                 pass
     elif minutes_since <= 30:
+        # STEADY: moderate activity (5-30 minutes since last edit)
         status_text.append("STEADY RHYTHM — Good progress. Consider a brief checkpoint.", style="bold cyan")
     else:
-        status_text.append("AURA FADING — It's been a while since edits. Consider a micro-break or a short planning session.", style="bold yellow")
-
-    # If idle for >60m, optionally fetch a 1-minute guided stretch from Copilot
-    # Respect user's --no-ai flag: only fetch Copilot suggestion if not opted out
-    if minutes_since > 60 and not getattr(args, 'no_ai', False):
-        status_text.append("\n\nFetching a 1-minute stretch suggestion from Copilot...", style="dim")
-        stretch_text = "(no suggestion available)"
-        try:
-            copilot_bin = shutil.which('copilot')
-            if copilot_bin:
-                cp = subprocess.run([copilot_bin, "-p", "Suggest a 1-minute desk stretch for a developer"], capture_output=True, text=True, timeout=8)
-                stretch_text = (cp.stdout or cp.stderr or "").strip()
-            else:
-                stretch_text = "Install the Copilot CLI to enable guided micro-breaks."
-        except subprocess.TimeoutExpired:
-            stretch_text = "Copilot timed out. Try again later."
-        except Exception:
-            stretch_text = "Could not fetch suggestion."
-
-        console.print(Rule(style="dim"))
-        console.print(Panel(Text(stretch_text, style="white"), title="1-minute micro-break", border_style="yellow"))
+        # REST: low activity (30+ minutes since last edit) — time for a break
+        status_text.append("REST — It's been a while since edits. Take a micro-break.", style="bold yellow")
 
     console.print(Rule(style="dim"))
     console.print(Panel(status_text, border_style="green" if minutes_since < 30 else "yellow"))
+
+    # If idle (and not in compact mode and not opted out), fetch Copilot wellness suggestion
+    if is_idle and not getattr(args, 'compact', False) and not getattr(args, 'no_ai', False):
+        console.print(Rule(style="dim"))
+        
+        # Show "Fetching wellness suggestion..." while Copilot is working in background
+        loading_spinner = Spinner("dots", text="[cyan]Fetching wellness suggestion...[/cyan]")
+        with Live(loading_spinner, console=console, refresh_per_second=8, transient=True) as live:
+            copilot_bin = shutil.which('copilot')
+            stretch_text = None
+            error_occurred = False
+            
+            try:
+                if copilot_bin:
+                    # Fetch a 1-minute physical stretch with extended timeout (30s to be safe)
+                    # This gives Copilot plenty of time to respond without user seeing timeout
+                    cp = subprocess.run(
+                        [copilot_bin, "-p", "Suggest a 1-minute physical stretch for a developer. Format as a numbered list (3-4 steps)."],
+                        capture_output=True, text=True, timeout=30
+                    )
+                    stretch_text = (cp.stdout or cp.stderr or "").strip()
+                    if not stretch_text:
+                        stretch_text = "Take a moment to stretch and breathe. Stand up, move around, and reset your mind."
+                else:
+                    stretch_text = "Install the Copilot CLI to enable guided wellness breaks."
+            except subprocess.TimeoutExpired:
+                error_occurred = True
+                stretch_text = "Copilot is taking longer than expected. Please try again in a moment."
+            except Exception as e:
+                error_occurred = True
+                stretch_text = f"Could not fetch suggestion: {str(e)[:50]}"
+        
+        # Play a friendly sound to draw attention to the break
+        try:
+            play_sound('bell')
+        except Exception:
+            pass
+
+        # Show Zen Break panel with the suggestion
+        if stretch_text:
+            console.print(Panel(Text(stretch_text, style="white"), title="Zen Break 🧘", border_style="yellow"))
+            console.print(Panel(Text("🎧 Vibe Check: Open [link=https://lofi.co]Lofi.co[/link] for focus beats.", style="white"), border_style="bright_blue"))
 
 
 def cmd_story(args):
@@ -585,7 +797,8 @@ Examples:
     pulse_parser.add_argument('--no-ai', action='store_true', help='Do not call Copilot for micro-break suggestions')
     pulse_parser.add_argument('--hours', type=int, default=6, help='Time window in hours for activity histogram (default: 6)')
     pulse_parser.add_argument('--compact', action='store_true', help='Compact output for CI/low-tty environments')
-    pulse_parser.add_argument('--celebrate', action='store_true', help='Enable longer/looping flame animation for Flow state')
+    pulse_parser.add_argument('--idle', type=int, default=15, help='Idle threshold in minutes to trigger Zen Break (default: 15)')
+    pulse_parser.add_argument('--force-zen', action='store_true', help='Force Zen Break (useful for testing)')
     pulse_parser.set_defaults(func=cmd_pulse)
     
     # Code story command

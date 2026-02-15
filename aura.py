@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Aura - A modular CLI tool for GitHub Copilot CLI hackathon.
+Aura - A modular CLI tool for GitHub Copilot CLI.
 Provides security, analytics, and development insights with stylized output.
 """
 
@@ -20,6 +20,7 @@ from rich.text import Text
 from rich.spinner import Spinner
 from rich.live import Live
 from rich.rule import Rule
+from rich.markdown import Markdown
 import time
 from collections import Counter
 from rich.progress import Progress, BarColumn, TextColumn, TimeRemainingColumn, SpinnerColumn
@@ -28,44 +29,119 @@ from rich.progress import Progress, BarColumn, TextColumn, TimeRemainingColumn, 
 console = Console(force_terminal=True, force_interactive=True)
 
 # Timings (tweak these to make animations faster/slower)
-HEADER_STEP_WAIT = 0.8  # seconds per header step
-LIVE_PANEL_WAIT_DEFAULT = 1.0  # default wait for live panels
+HEADER_STEP_WAIT = 0.5  # seconds per header step (faster)
+LIVE_PANEL_WAIT_DEFAULT = 0.8  # default wait for live panels
+
+# Module Color Themes - Each module has its own distinct vibrant palette
+MODULE_THEMES = {
+    'header': {
+        'primary': 'bright_white',
+        'secondary': 'bright_cyan',
+        'border': 'bright_cyan',
+        'accent': 'cyan'
+    },
+    'check': {  # Security - Crimson/Orange (alert, warning)
+        'primary': 'bright_red',
+        'secondary': 'red',
+        'border': 'bright_red',
+        'accent': 'yellow',
+        'text': 'bright_yellow'
+    },
+    'pulse': {  # Health - Magenta/Pink (energy, vitality)
+        'primary': 'bright_magenta',
+        'secondary': 'magenta',
+        'border': 'bright_magenta',
+        'accent': 'bright_cyan',
+        'text': 'bright_cyan'
+    },
+    'story': {  # Documentation - Blue/Indigo (creativity, wisdom)
+        'primary': 'bright_blue',
+        'secondary': 'blue',
+        'border': 'bright_blue',
+        'accent': 'bright_white',
+        'text': 'bright_white'
+    },
+    'eco': {  # Green Computing - Green/Teal (sustainability)
+        'primary': 'bright_green',
+        'secondary': 'green',
+        'border': 'bright_green',
+        'accent': 'cyan',
+        'text': 'cyan'
+    },
+    'fly': {  # Onboarding - Yellow/Gold (launch, energy)
+        'primary': 'bright_yellow',
+        'secondary': 'yellow',
+        'border': 'bright_yellow',
+        'accent': 'bright_white',
+        'text': 'bright_white'
+    }
+}
 
 
-def render_title_panel(label: str, palette: list[str], border_style: str):
-    """Render a centered, animated title panel with a color palette."""
+def get_theme(module: str) -> dict:
+    """Get the color theme for a module."""
+    return MODULE_THEMES.get(module, MODULE_THEMES['header'])
+
+
+def render_title_panel(label: str, module: str = 'header'):
+    """Render a centered title panel with module-specific colors."""
     from rich.align import Align
-
-    title_text = Text()
-    for i, ch in enumerate(label):
-        title_text.append(ch, style=palette[i % len(palette)])
+    
+    theme = get_theme(module)
+    title_text = Text(label, style=f"bold {theme['primary']}")
+    
     return Panel(
         Align(title_text, align="center"),
-        border_style=border_style,
+        border_style=theme['border'],
         padding=(1, 2),
-        box=box.ROUNDED
+        box=box.DOUBLE
     )
 
 
 def display_header():
-    """Display the AURA CLI header with bold styling and animation."""
-    # Animated header with initialization animation
+    """Display the AURA CLI header with vibrant styling and smooth animation."""
+    theme = get_theme('header')
+    
+    # Quick animated header with initialization
     steps = [
-        "✨ Initializing Aura...",
-        "🔌 Loading modules...",
-        "⚙️  Applying configuration...",
-        "✅ Ready"
+        ("◈", "Initializing Aura"),
+        ("◈◈", "Loading modules"),
+        ("◈◈◈", "Ready to assist")
     ]
 
-    # Show each step briefly
-    for step in steps:
-        with console.status(f"[bold magenta]{step}[/bold magenta]", spinner="dots"):
+    for dots, step in steps:
+        with console.status(f"[bold {theme['secondary']}]{dots} {step}...[/bold {theme['secondary']}]", spinner="dots"):
             time.sleep(HEADER_STEP_WAIT)
 
-    # Main headline (consistent with command headers)
-    palette = ["bright_magenta", "magenta", "bright_blue", "blue", "bright_magenta"]
-    panel = render_title_panel("✨ AURA CLI ✨", palette, border_style="magenta")
-    console.print(panel)
+    # Main headline with consistent vibrant color
+    console.print(render_title_panel("◆ AURA CLI ◆", 'header'))
+
+
+def render_ai_output(content: str, title: str, module: str):
+    """Render AI output consistently across all modules with proper formatting."""
+    theme = get_theme(module)
+    
+    # Check if it's an error/fallback message
+    error_keywords = ["timeout", "error", "not found", "unavailable", "not authenticated", "skipped"]
+    is_error = any(keyword in content.lower() for keyword in error_keywords)
+    
+    if is_error:
+        console.print(Panel(
+            Text(f"{title}\n{content}", style=f"dim {theme['accent']}"),
+            border_style=theme['border'],
+            padding=(1, 2)
+        ))
+    else:
+        # Render as Markdown WITHOUT style override - let Rich format headers, bold, code naturally
+        md = Markdown(content)
+        console.print(Panel(
+            md,
+            title=title,
+            border_style=theme['border'],
+            box=box.ROUNDED,
+            padding=(1, 2),
+            width=min(100, console.width - 2)
+        ))
 
 
 def _print_live_panel(title: str, message: str, style: str = "cyan", wait: float = LIVE_PANEL_WAIT_DEFAULT):
@@ -474,7 +550,9 @@ def scan_bloat(max_size_mb: int = 50, top_n: int = 5):
         (largest_files, total_bloat_mb)
         where largest_files = [(path, size_mb, impact_label), ...]
     """
-    exclude_dirs = {'.git', 'node_modules', '.venv', '__pycache__', '.pytest_cache', 'site-packages'}
+    # Smart exclusion: ignore system/cache directories
+    exclude_dirs = {'.git', 'node_modules', '.venv', '__pycache__', '.pytest_cache', 
+                    'site-packages', '.mypy_cache', '.tox', 'dist', 'build', 'eggs', '.eggs'}
     file_sizes = []
 
     for root, dirs, files in os.walk('.'):
@@ -501,8 +579,84 @@ def scan_bloat(max_size_mb: int = 50, top_n: int = 5):
     return largest_files, total_bloat_mb
 
 
-def analyze_complexity_with_copilot(main_script: str = "aura.py", snippet_lines: int = 40) -> str:
-    """Send a short main-script snippet to Copilot for complexity analysis."""
+def get_previous_carbon_grade() -> tuple[str | None, str | None]:
+    """Read the previous carbon grade from GREEN_AUDIT.md for progress tracking.
+    
+    Returns:
+        (previous_grade, previous_timestamp) or (None, None) if not found
+    """
+    try:
+        if not os.path.exists('GREEN_AUDIT.md'):
+            return None, None
+        
+        with open('GREEN_AUDIT.md', 'r', encoding='utf-8') as f:
+            content = f.read()
+        
+        # Find the most recent audit entry
+        import re
+        # Look for pattern: ### Audit - YYYY-MM-DD HH:MM:SS followed by Carbon Grade: X
+        audit_pattern = r'### Audit - (\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}).*?Carbon Grade: ([A-F])'
+        matches = re.findall(audit_pattern, content, re.DOTALL)
+        
+        if matches:
+            # Return the most recent (last) entry
+            return matches[-1][1], matches[-1][0]
+        
+        # Fallback: look for old format
+        grade_match = re.search(r'Carbon Grade: ([A-F])', content)
+        if grade_match:
+            return grade_match.group(1), None
+            
+    except Exception:
+        pass
+    
+    return None, None
+
+
+def get_zerve_recommendations(complexity_feedback: str) -> list[str]:
+    """Analyze complexity feedback for high-frequency patterns and suggest optimizations.
+    
+    Returns list of 'Zerve' recommendations for batch processing or serverless patterns.
+    """
+    recommendations = []
+    feedback_lower = (complexity_feedback or "").lower()
+    
+    # Detect high-frequency logic patterns
+    high_freq_indicators = [
+        'loop', 'iteration', 'for each', 'repeated', 'multiple calls',
+        'subprocess', 'api call', 'http request', 'database query',
+        'event', 'trigger', 'webhook', 'polling', 'interval'
+    ]
+    
+    has_high_freq = any(indicator in feedback_lower for indicator in high_freq_indicators)
+    
+    if has_high_freq:
+        if 'subprocess' in feedback_lower or 'api' in feedback_lower or 'http' in feedback_lower:
+            recommendations.append(
+                "**Batch Processing**: Group multiple API/subprocess calls into batches to reduce idle energy waste."
+            )
+        
+        if 'loop' in feedback_lower or 'iteration' in feedback_lower or 'repeated' in feedback_lower:
+            recommendations.append(
+                "**Serverless Pattern**: Consider event-driven serverless functions for high-frequency logic to minimize idle compute."
+            )
+        
+        if 'polling' in feedback_lower or 'interval' in feedback_lower:
+            recommendations.append(
+                "**Event-Driven Architecture**: Replace polling with webhooks/events to eliminate unnecessary CPU cycles."
+            )
+    
+    # Detect I/O patterns
+    if 'file' in feedback_lower and ('read' in feedback_lower or 'write' in feedback_lower):
+        recommendations.append(
+            "**Lazy I/O**: Use streaming/generators instead of loading entire files to reduce memory and energy footprint."
+        )
+    
+    return recommendations
+
+
+def analyze_complexity_with_copilot(main_script: str = "aura.py", snippet_lines: int = 20) -> str:
+    """Send a short main-script snippet to GitHub Copilot CLI for complexity analysis."""
     try:
         if not os.path.exists(main_script):
             return "Main script not found. Skipping complexity analysis."
@@ -510,53 +664,96 @@ def analyze_complexity_with_copilot(main_script: str = "aura.py", snippet_lines:
         with open(main_script, 'r', encoding='utf-8') as f:
             lines = f.read().splitlines()
 
+        # Use a shorter snippet for faster response (20 lines by default)
         snippet = "\n".join(lines[:snippet_lines])
         if not snippet.strip():
             return "Main script is empty. Skipping complexity analysis."
 
-        if not check_copilot_auth():
-            return "Copilot CLI not authenticated. Run: copilot -i /login"
-
+        # Check for copilot CLI (GitHub Copilot CLI)
         copilot_bin = shutil.which('copilot')
         if not copilot_bin:
-            return "Copilot binary not found. Skipping AI analysis."
+            return "GitHub Copilot CLI not found. Install with: npm install -g @github/copilot"
 
+        # Build a concise prompt for complexity analysis - ask for structured output
         prompt = (
-            "Analyze this code for algorithmic complexity (Big O). Identify nested loops or redundant I/O that "
-            "cause high CPU spikes. Suggest one Carbon-Neutral refactor to reduce energy consumption.\n\n"
-            f"Code snippet (first {snippet_lines} lines):\n{snippet}"
+            f"Analyze this code for algorithmic complexity (Big O). Identify nested loops or redundant I/O "
+            f"that cause high CPU spikes. Suggest one Carbon-Neutral refactor to reduce energy consumption. "
+            f"Give a brief, structured response with: 1) Complexity rating, 2) Issues found, 3) One refactor suggestion.\n\n{snippet}"
         )
 
-        def run_prompt(prompt_text: str, timeout_sec: int) -> str | None:
-            result = subprocess.run(
-                [copilot_bin, "-p", prompt_text],
-                capture_output=True, text=True, timeout=timeout_sec
-            )
-            if result.returncode == 0 and result.stdout:
-                return result.stdout.strip()
-            return None
-
-        response = run_prompt(prompt, 15)
-        if response:
-            return response
-
-        # Retry quickly with a shorter snippet to reduce latency under load.
-        short_lines = max(10, snippet_lines // 2)
-        short_snippet = "\n".join(lines[:short_lines])
-        short_prompt = (
-            "Analyze this code for algorithmic complexity (Big O). Identify nested loops or redundant I/O that "
-            "cause high CPU spikes. Suggest one Carbon-Neutral refactor to reduce energy consumption.\n\n"
-            f"Code snippet (first {short_lines} lines):\n{short_snippet}"
+        # Use copilot CLI via stdin with /quit to exit after response
+        input_text = f"{prompt}\n/quit\n"
+        
+        result = subprocess.run(
+            [copilot_bin],
+            input=input_text,
+            capture_output=True,
+            text=True,
+            timeout=90
         )
-        response = run_prompt(short_prompt, 15)
-        if response:
-            return response
 
-        return "Copilot analysis unavailable. Defaulting to O(n) complexity."
+        output = (result.stdout or "").strip()
+        error = (result.stderr or "").strip()
+
+        if output:
+            # Clean up the output - extract only the actual analysis, skip tool logs
+            clean_lines = []
+            in_analysis = False
+            skip_patterns = [
+                '● Read', '● Check', '● Grep', '● Explore', '● Create',
+                '└ ', '$ ', 'lines read', 'lines found', 'lines...',
+                'Total usage est:', 'API time spent:', 'Total session time:',
+                'Total code changes:', 'Breakdown by AI model:', 'claude-',
+                'I\'ll analyze', 'Let me analyze', 'Would you like me to'
+            ]
+            
+            for line in output.split('\n'):
+                stripped = line.strip()
+                
+                # Skip empty lines
+                if not stripped:
+                    if in_analysis:
+                        clean_lines.append('')  # Keep paragraph breaks in analysis
+                    continue
+                
+                # Skip copilot tool logs and stats
+                if any(pattern in line for pattern in skip_patterns):
+                    continue
+                
+                # Skip copilot prompts
+                if stripped.startswith('>') or stripped.startswith('copilot>'):
+                    continue
+                
+                # Start capturing when we see analysis headers or bullet points
+                if stripped.startswith('##') or stripped.startswith('**') or stripped.startswith('###'):
+                    in_analysis = True
+                
+                # Also capture numbered lists, bullet points, and code blocks
+                if stripped.startswith('-') or stripped.startswith('1.') or stripped.startswith('2.') or stripped.startswith('3.'):
+                    in_analysis = True
+                
+                if stripped.startswith('```'):
+                    in_analysis = True
+                
+                if in_analysis or stripped.startswith('##') or stripped.startswith('**'):
+                    clean_lines.append(line)
+            
+            # Remove trailing empty lines
+            while clean_lines and not clean_lines[-1].strip():
+                clean_lines.pop()
+            
+            result_text = '\n'.join(clean_lines).strip()
+            return result_text if result_text else "Copilot analysis completed. Code appears efficient."
+        elif error:
+            if "auth" in error.lower() or "login" in error.lower():
+                return "GitHub Copilot not authenticated. Run: copilot login"
+            return f"Copilot: {error[:100]}"
+
+        return "Copilot analysis completed. Using local O(n) assessment."
     except subprocess.TimeoutExpired:
-        return "Analysis timeout (15s exceeded). Defaulting to O(n) complexity."
+        return "Analysis timeout. Using local O(n) assessment for filesystem operations."
     except Exception as e:
-        return f"Analysis error: {str(e)[:50]}. Defaulting to O(n) complexity."
+        return f"Analysis error: {str(e)[:80]}. Using local O(n) assessment."
 
 
 def calculate_carbon_score(largest_files: list, complexity_feedback: str) -> str:
@@ -586,86 +783,101 @@ def calculate_carbon_score(largest_files: list, complexity_feedback: str) -> str
 
 def cmd_check(args):
     """Security check subcommand."""
-    palette = ["bright_red", "red", "bright_magenta", "magenta", "bright_red"]
-    console.print(render_title_panel("AURA — SECURITY", palette, border_style="red"))
+    theme = get_theme('check')
+    console.print(render_title_panel("◆ AURA — SECURITY ◆", 'check'))
     
     # Pre-flight check: Verify Copilot CLI authentication
     if not check_copilot_auth():
-        console.print("[bold red]⚠️  Aura needs your help![/bold red]")
-        console.print("Please run [bold cyan]copilot -i /login[/bold cyan] to authenticate the Copilot agent.\n")
-        console.print("Important: after running [bold cyan]copilot -i /login[/bold cyan], open a new terminal to run Aura commands. The Copilot login opens an agent that may occupy the current terminal and prevent Aura output from appearing in the same session.")
+        console.print(f"[bold {theme['primary']}]⚠ Aura needs your help![/bold {theme['primary']}]")
+        console.print(f"Please run [bold {theme['accent']}]copilot login[/bold {theme['accent']}] to authenticate.\n")
         return
 
-    # Make scan feel more alive: brief live intro, then run scan with progress
-    _print_live_panel("🔎 Scanning", "Preparing to scan files for secrets...", style="cyan", wait=1.0)
+    # Make scan feel more alive
+    _print_live_panel("Scanning", "Analyzing files for exposed secrets...", style=theme['secondary'], wait=0.8)
     secrets_found, env_issues, remediation_prompt = scan_secrets()
-    console.print()  # Add blank line after scan completes
+    console.print()
     
     if secrets_found:
         # Create a Rich Table for secrets findings
-        table = Table(title="[bold red]Security Findings[/bold red]", border_style="red")
-        table.add_column("File Name", style="cyan")
-        table.add_column("Secret Type", style="yellow")
-        table.add_column("Action", style="magenta")
+        table = Table(
+            title=f"[bold {theme['primary']}]Security Findings[/bold {theme['primary']}]",
+            border_style=theme['border'],
+            box=box.ROUNDED
+        )
+        table.add_column("File", style=theme['text'])
+        table.add_column("Type", style=theme['accent'])
+        table.add_column("Status", style=theme['primary'])
         
         for filepath, secret_type, value in secrets_found:
-            masked_value = value[:8] + '...' if len(value) > 8 else value
-            table.add_row(filepath, secret_type, "Review & Remediate")
+            table.add_row(filepath, secret_type, "⚠ Review Required")
         
         console.print(table)
-        # NOTE: local "What to do next" checklist removed per user request.
-        # Query GitHub Copilot for guidance (capture output and print cleanly)
-        console.print("[bold purple]Consulting the Oracle...[/bold purple]\n")
-        try:
+        console.print()
+        
+        # Query Copilot for remediation guidance
+        loading_spinner = Spinner("dots", text=f"[{theme['secondary']}]Consulting AI for remediation...[/{theme['secondary']}]")
+        with Live(loading_spinner, console=console, refresh_per_second=8, transient=True):
             copilot_path = shutil.which('copilot')
-            if not copilot_path:
-                raise FileNotFoundError("copilot CLI not found")
-
-            # Build a prompt that includes counts per secret type and file list
-            found_summaries = []
-            types = []
-            for fpath, stype, _ in secrets_found:
-                found_summaries.append(f"{fpath} ({stype})")
-                types.append(stype)
-            found_list = ", ".join(sorted(set(found_summaries))) if found_summaries else "<unknown>"
-
-            counts = Counter(types)
-            if counts:
-                counts_list = ", ".join(f"{v} {k}{'s' if v>1 else ''}" for k, v in counts.items())
-            else:
-                counts_list = "unknown types"
-
-            # If the repository doesn't look like a git repo, tell Copilot so it can give safe local-only advice
-            repo_note = "The repository appears to have a .git directory." if os.path.isdir('.git') else "This project does not appear to be a git repository (no .git directory). Provide remediation steps that are safe for users who have not pushed to a remote yet."
-
-            prompt = (
-                f"The security scan found the following secrets: {found_list} (summary: {counts_list}). "
-                f"{repo_note} IMMEDIATELY output clear, numbered remediation steps as plain text. "
-                "For each step include the exact shell commands where applicable, and clearly label any steps that are destructive or that rewrite git history. "
-                "If the user may be new to git, include safe 'first-time' guidance (how to backup, how to check if a file is tracked, and how to rotate credentials)."
-            )
-
-            # Run copilot non-interactively and capture output to avoid noisy streaming
-            with console.status("[bold purple]Querying Copilot for remediation steps...[/bold purple]", spinner="bouncingBar"):
-                result = subprocess.run([copilot_path, "--allow-all-tools", "-p", prompt], capture_output=True, text=True, timeout=60)
-
-            copilot_out = (result.stdout or '').strip()
-            copilot_err = (result.stderr or '').strip()
-
-            if copilot_out:
-                console.print(Panel(Text(copilot_out, style="white"), title="Copilot remediation (stdout)", border_style="purple"))
-            if copilot_err:
-                console.print(Panel(Text(copilot_err, style="yellow"), title="Copilot remediation (stderr)", border_style="yellow"))
-
-            if not copilot_out and not copilot_err:
-                console.print("[bold yellow]Note:[/bold yellow] Copilot returned no output.")
-
-        except FileNotFoundError:
+        
+        if not copilot_path:
             console.print("[bold yellow]Note:[/bold yellow] 'copilot' CLI not found. Install the Copilot CLI to get AI-powered remediation guidance.")
-        except subprocess.TimeoutExpired:
-            console.print("[bold yellow]⚠️  AI took too long to respond, please try again.[/bold yellow]")
-        except Exception as e:
-            console.print(f"[bold yellow]Note:[/bold yellow] Could not query GitHub Copilot: {e}")
+        else:
+            try:
+                # Build a prompt that includes counts per secret type and file list
+                found_summaries = []
+                types = []
+                for fpath, stype, _ in secrets_found:
+                    found_summaries.append(f"{fpath} ({stype})")
+                    types.append(stype)
+                found_list = ", ".join(sorted(set(found_summaries))) if found_summaries else "<unknown>"
+
+                counts = Counter(types)
+                if counts:
+                    counts_list = ", ".join(f"{v} {k}{'s' if v>1 else ''}" for k, v in counts.items())
+                else:
+                    counts_list = "unknown types"
+
+                # If the repository doesn't look like a git repo, tell Copilot so it can give safe local-only advice
+                repo_note = "The repository appears to have a .git directory." if os.path.isdir('.git') else "This project does not appear to be a git repository (no .git directory). Provide remediation steps that are safe for users who have not pushed to a remote yet."
+
+                prompt = (
+                    f"The security scan found the following secrets: {found_list} (summary: {counts_list}). "
+                    f"{repo_note} IMMEDIATELY output clear, numbered remediation steps as plain text. "
+                    "For each step include the exact shell commands where applicable, and clearly label any steps that are destructive or that rewrite git history. "
+                    "If the user may be new to git, include safe 'first-time' guidance (how to backup, how to check if a file is tracked, and how to rotate credentials)."
+                )
+
+                input_text = f"{prompt}\n/quit\n"
+                
+                result = subprocess.run(
+                    [copilot_path],
+                    input=input_text,
+                    capture_output=True,
+                    text=True,
+                    timeout=90
+                )
+
+                copilot_out = (result.stdout or '').strip()
+                
+                # Clean the output
+                if copilot_out:
+                    clean_lines = []
+                    for line in copilot_out.split('\n'):
+                        line_stripped = line.strip()
+                        if any(skip in line_stripped for skip in ['Total usage:', 'API time:', 'session time:', '●', '└', '├']):
+                            continue
+                        clean_lines.append(line)
+                    copilot_out = '\n'.join(clean_lines)
+
+                if copilot_out:
+                    render_ai_output(copilot_out, "🛡️ Remediation Steps", 'check')
+                else:
+                    console.print("[bold yellow]Note:[/bold yellow] Copilot returned no output.")
+
+            except subprocess.TimeoutExpired:
+                console.print("[bold yellow]⚠️  AI took too long to respond, please try again.[/bold yellow]")
+            except Exception as e:
+                console.print(f"[bold yellow]Note:[/bold yellow] Could not query GitHub Copilot: {e}")
     
     if env_issues:
         # Create a table for env file permission issues
@@ -684,23 +896,17 @@ def cmd_check(args):
 
 
 def cmd_pulse(args):
-    """Code health pulse subcommand.
-
-    This is a richer wellness dashboard with professional styling, activity
-    histogram, focus meter, and repo-aware metrics. It avoids playful or
-    childish wording and aims to provide actionable, glanceable insights.
-    """
+    """Code health pulse subcommand - Wellness dashboard with activity metrics."""
     from rich.align import Align
     from rich.columns import Columns
     from rich.rule import Rule
 
-    # Polished title with PULSE-appropriate calm palette
-    palette = ["bright_cyan", "cyan", "bright_blue", "blue", "bright_cyan"]
+    theme = get_theme('pulse')
 
     if not getattr(args, 'compact', False):
-        console.print(render_title_panel("AURA — PULSE", palette, border_style="cyan"))
+        console.print(render_title_panel("◆ AURA — PULSE ◆", 'pulse'))
 
-    _print_live_panel("Analyzing workspace", "Compiling activity signals...", style="cyan", wait=(0.8 if not getattr(args, 'compact', False) else 0))
+    _print_live_panel("Analyzing", "Compiling activity signals...", style=theme['secondary'], wait=(0.6 if not getattr(args, 'compact', False) else 0))
 
     # Collect file mtimes using helper; allow --hours to change histogram window
     hours = getattr(args, 'hours', 6)
@@ -764,7 +970,7 @@ def cmd_pulse(args):
         git_info = None
 
     # Build left and right columns
-    left = Panel(Group(stats_table, Text("\nActivity (last 6h)", style="bold underline"), *hist_lines), title="Overview", border_style="cyan")
+    left = Panel(Group(stats_table, Text("\nActivity (last 6h)", style="bold underline"), *hist_lines), title="📊 Overview", border_style=theme['secondary'])
     right_items = [focus_text]
     if git_info:
         right_items.append(Text(git_info, style="dim"))
@@ -774,7 +980,7 @@ def cmd_pulse(args):
     for i, m in enumerate(micro, start=1):
         right_items.append(Text(f"{i}. {m}", style="white"))
 
-    right = Panel(Group(*right_items), title="Focus & Suggestions", border_style="magenta")
+    right = Panel(Group(*right_items), title="🎯 Focus & Suggestions", border_style=theme['primary'])
 
     # If compact output requested, print a single JSON line and exit
     if getattr(args, 'compact', False):
@@ -819,7 +1025,7 @@ def cmd_pulse(args):
         status_text.append("REST — It's been a while since edits. Take a micro-break.", style="bold yellow")
 
     console.print(Rule(style="dim"))
-    console.print(Panel(status_text, border_style="green" if minutes_since < 30 else "yellow"))
+    console.print(Panel(status_text, border_style=theme['primary'] if minutes_since < 30 else "yellow"))
 
     # If idle (and not in compact mode and not opted out), fetch Copilot wellness suggestion
     if is_idle and not getattr(args, 'compact', False) and not getattr(args, 'no_ai', False):
@@ -860,83 +1066,127 @@ def cmd_pulse(args):
 
         # Show Zen Break panel with the suggestion
         if stretch_text:
-            console.print(Panel(Text(stretch_text, style="white"), title="Zen Break 🧘", border_style="yellow"))
-            console.print(Panel(Text("🎧 Vibe Check: Open [link=https://lofi.co]Lofi.co[/link] for focus beats.", style="white"), border_style="bright_blue"))
+            console.print(Panel(Text(stretch_text, style="white"), title="🧘 Zen Break", border_style=theme['accent']))
+            console.print(Panel(Text("🎧 Vibe Check: Open [link=https://lofi.co]Lofi.co[/link] for focus beats.", style="white"), border_style=theme['secondary']))
 
 
 def cmd_story(args):
     """Code story/documentation subcommand - Founder's Journal."""
-    palette = ["bright_blue", "blue", "cyan", "bright_cyan", "blue"]
-    console.print(render_title_panel("AURA — STORY", palette, border_style="blue"))
+    theme = get_theme('story')
+    
+    console.print(render_title_panel("◆ AURA — STORY ◆", 'story'))
 
-    _print_live_panel("Analyzing changes", "Gathering recent code updates...", style="blue", wait=1.0)
+    _print_live_panel("Analyzing changes", "Gathering recent code updates...", style=theme['secondary'], wait=0.8)
     git_diff = get_git_diff(lines=40)
 
     if not git_diff:
         console.print(Panel(
             "[bold cyan]ℹ️  No code changes detected.[/bold cyan]\n\n"
             "Tip: Make a change and commit to generate your Founder's Journal entry.",
-            border_style="cyan",
+            border_style=theme['secondary'],
             padding=(1, 2)
         ))
         return
 
-    loading_spinner = Spinner("dots", text="[blue]Composing your Founder's Journal...[/blue]")
+    loading_spinner = Spinner("dots", text=f"[{theme['primary']}]✨ Composing your Founder's Journal...[/{theme['primary']}]")
     journal_entry = None
     with Live(loading_spinner, console=console, refresh_per_second=8, transient=True):
         try:
             copilot_bin = shutil.which('copilot')
             if copilot_bin:
                 prompt = (
-                    "Based on these recent code changes, write a short, 3-sentence 'Founder's Journal' entry "
-                    "that explains the progress in a professional yet confident tone. Avoid technical jargon.\n\n"
+                    "Based on these recent code changes, write a short, inspiring 'Founder's Journal' entry "
+                    "that celebrates the progress. Use 3-4 sentences with a confident, proud tone. "
+                    "Start with something like 'Today marks...' or 'Another milestone...' - make the developer feel accomplished.\n\n"
                     f"Code changes:\n{git_diff}"
                 )
-                cp = subprocess.run([copilot_bin, "-p", prompt], capture_output=True, text=True, timeout=30)
-                journal_entry = (cp.stdout or cp.stderr or "").strip()
+                input_text = f"{prompt}\n/quit\n"
+                cp = subprocess.run([copilot_bin], input=input_text, capture_output=True, text=True, timeout=60)
+                raw_output = (cp.stdout or cp.stderr or "").strip()
+                # Clean the output
+                clean_lines = []
+                for line in raw_output.split('\n'):
+                    line_stripped = line.strip()
+                    if not line_stripped:
+                        continue
+                    if any(skip in line_stripped for skip in ['Total usage:', 'API time:', 'session time:', '●', '└', '├']):
+                        continue
+                    clean_lines.append(line)
+                journal_entry = '\n'.join(clean_lines)
             if not journal_entry:
                 journal_entry = (
-                    "Today we made solid progress on the codebase. The team focused on quality and reliability, "
-                    "moving the project forward with clear, purposeful improvements."
+                    "Today marks meaningful progress on the codebase. The changes demonstrate thoughtful engineering "
+                    "and move the project closer to its goals. Every commit is a step forward."
                 )
         except subprocess.TimeoutExpired:
             journal_entry = (
-                "Progress is moving steadily. The team delivered meaningful updates and kept momentum strong."
+                "Progress continues steadily. The team delivered valuable updates, keeping momentum strong and the vision clear."
             )
         except Exception:
             journal_entry = (
-                "This session added thoughtful refinements and kept the project moving in the right direction."
+                "This session added thoughtful refinements that strengthen the foundation and propel the project forward."
             )
 
     # Clean the journal entry
-    clean_lines = [line for line in journal_entry.split('\n') if line.strip() and line.strip() != '---']
-    final_entry = '\n'.join(clean_lines).replace('**', '').strip()
+    final_entry = journal_entry.replace('**', '').strip()
 
     console.print(Rule(style="dim"))
+    
+    # Render AI output using the helper for consistency
+    render_ai_output(final_entry, "📖 Today's Story", 'story')
+    
+    # Append to STORY_JOURNAL.md
+    timestamp = time.strftime('%Y-%m-%d %H:%M:%S')
+    journal_md_entry = f"""
+### {timestamp}
+
+{final_entry}
+
+---
+"""
+    
+    try:
+        journal_header = f"""# 📖 Founder's Journal - {os.path.basename(os.getcwd())}
+
+*Your development story, one commit at a time.*
+
+---
+"""
+        if os.path.exists('STORY_JOURNAL.md'):
+            with open('STORY_JOURNAL.md', 'a', encoding='utf-8') as f:
+                f.write(journal_md_entry)
+        else:
+            with open('STORY_JOURNAL.md', 'w', encoding='utf-8') as f:
+                f.write(journal_header + journal_md_entry)
+        
+        console.print(Panel(
+            Text("✓ Entry added to STORY_JOURNAL.md", style=theme['accent']),
+            border_style=theme['border'],
+            padding=(0, 2)
+        ))
+    except Exception as e:
+        console.print(f"[yellow]⚠️  Could not save STORY_JOURNAL.md: {str(e)[:50]}[/yellow]")
+    
+    # Proud closing message
     console.print(Panel(
-        Text(final_entry, style="white"),
-        title="📖 Today's Story",
-        border_style="blue",
-        padding=(1, 2)
-    ))
-    console.print(Panel(
-        Text("💭 Reflect on your progress and celebrate the small wins.", style="dim"),
-        border_style="blue",
+        Text("🎉 You're building something great. Keep shipping!", style=f"bold {theme['primary']}"),
+        border_style=theme['primary'],
         padding=(0, 2)
     ))
 
 
 def cmd_eco(args):
     """Ecosystem analysis subcommand - Carbon audit."""
-    palette = ["bright_green", "green", "bright_cyan", "cyan", "bright_green"]
+    theme = get_theme('eco')
+    
     if not getattr(args, 'compact', False):
-        console.print(render_title_panel("AURA — ECO", palette, border_style="green"))
+        console.print(render_title_panel("◆ AURA — ECO ◆", 'eco'))
 
     # Scan for bloat with loading indicator
     if getattr(args, 'compact', False):
         largest_files, total_bloat = scan_bloat()
     else:
-        loading_spinner = Spinner("dots", text="[green]Scanning filesystem for bloat...[/green]")
+        loading_spinner = Spinner("dots", text=f"[{theme['primary']}]🌿 Scanning filesystem for bloat...[/{theme['primary']}]")
         with Live(loading_spinner, console=console, refresh_per_second=8, transient=True):
             largest_files, total_bloat = scan_bloat()
 
@@ -947,7 +1197,7 @@ def cmd_eco(args):
         if getattr(args, 'compact', False):
             complexity_feedback = analyze_complexity_with_copilot()
         else:
-            loading_spinner = Spinner("dots", text="[green]Analyzing code complexity with AI...[/green]")
+            loading_spinner = Spinner("dots", text=f"[{theme['primary']}]🌿 Analyzing code complexity with AI...[/{theme['primary']}]")
             with Live(loading_spinner, console=console, refresh_per_second=8, transient=True):
                 complexity_feedback = analyze_complexity_with_copilot()
 
@@ -1011,27 +1261,56 @@ def cmd_eco(args):
         console.print(Panel(
             summary,
             title="🌿 Eco Audit",
-            border_style="bright_green",
+            border_style=theme['primary'],
             box=box.ROUNDED,
             padding=(1, 2)
         ))
 
         if complexity_feedback:
-            if any(term in complexity_feedback.lower() for term in ["timeout", "error", "not found", "unavailable"]):
-                console.print(Panel(
-                    Text("🤖 AI Insights\n" + complexity_feedback + "\n\nUsing local assessment: O(n) complexity for filesystem operations.", style="dim yellow"),
-                    border_style="yellow",
-                    padding=(1, 2)
-                ))
-            else:
-                console.print(Panel(
-                    Text(complexity_feedback, style="white"),
-                    title="🤖 AI Insights",
-                    border_style="bright_green",
-                    padding=(1, 2)
-                ))
+            render_ai_output(complexity_feedback, "🌿 AI Insights", 'eco')
+        
+        # Display Zerve recommendations if high-frequency patterns detected
+        zerve_recs = get_zerve_recommendations(complexity_feedback)
+        if zerve_recs:
+            zerve_content = "\n".join(f"• {rec}" for rec in zerve_recs)
+            console.print(Panel(
+                Markdown(zerve_content),
+                title="⚡ Zerve Optimizations",
+                border_style=theme['border'],
+                box=box.ROUNDED,
+                padding=(1, 2)
+            ))
 
-    # Generate GREEN_AUDIT.md documentation
+    # Generate GREEN_AUDIT.md documentation (Persistent Green Journal)
+    timestamp = time.strftime('%Y-%m-%d %H:%M:%S')
+    
+    # Get previous grade for progress tracking
+    prev_grade, prev_timestamp = get_previous_carbon_grade()
+    
+    # Calculate progress
+    grade_order = {'A': 1, 'B': 2, 'C': 3, 'D': 4, 'E': 5, 'F': 6}
+    if prev_grade and prev_grade in grade_order and carbon_score in grade_order:
+        prev_rank = grade_order[prev_grade]
+        curr_rank = grade_order[carbon_score]
+        if curr_rank < prev_rank:
+            progress_text = f"🌱 Getting Greener! Improved from {prev_grade} → {carbon_score}"
+            progress_emoji = "📈"
+        elif curr_rank > prev_rank:
+            progress_text = f"⚠️ More Bloated - Regressed from {prev_grade} → {carbon_score}"
+            progress_emoji = "📉"
+        else:
+            progress_text = f"➡️ Stable - Maintained grade {carbon_score}"
+            progress_emoji = "📊"
+    else:
+        progress_text = "🆕 First Audit - Baseline established"
+        progress_emoji = "🎯"
+    
+    # Get Zerve recommendations for high-frequency patterns
+    zerve_recs = get_zerve_recommendations(complexity_feedback)
+    zerve_section = ""
+    if zerve_recs:
+        zerve_section = "\n**Zerve Optimizations (Energy-Efficient Patterns):**\n" + "\n".join(f"- {rec}" for rec in zerve_recs)
+    
     heavy_file_lines = "\n".join(
         [f"- {fpath} ({size_mb:.2f} MB) — {impact}" for fpath, size_mb, impact in largest_files if size_mb > 50]
     )
@@ -1042,13 +1321,16 @@ def cmd_eco(args):
         [f"| {fpath} | {size_mb:.2f} MB | {impact} |" for fpath, size_mb, impact in largest_files]
     ) or "| No files found | - | - |"
 
-    green_content = f"""# 🌿 Carbon Audit Report - {os.path.basename(os.getcwd())}
+    # New audit entry (appended to journal)
+    audit_entry = f"""
+### Audit - {timestamp}
 
-## Carbon Grade: {carbon_score}
+**Carbon Grade: {carbon_score}** {progress_emoji}
 
-Generated on: {time.strftime('%Y-%m-%d %H:%M:%S')}
+#### Progress
+{progress_text}
 
-### Static Bloat Scan (Top 5 Largest Files)
+#### Static Bloat Scan (Top 5 Largest Files)
 
 | File | Size | Energy Impact |
 | --- | --- | --- |
@@ -1059,26 +1341,46 @@ Generated on: {time.strftime('%Y-%m-%d %H:%M:%S')}
 
 **Total Size (Top {len(largest_files)} files):** {total_bloat_text}
 
-### AI Complexity Audit
+#### AI Complexity Audit
 
 {complexity_feedback}
 
-### Recommendations
+#### Recommendations
 
 1. **Prune or ignore heavy assets**: Move large artifacts to archives or add them to `.gitignore`.
 2. **Refactor hotspots**: Apply the AI-suggested refactor to reduce CPU spikes.
 3. **Monitor sustainability**: Run `aura eco` regularly and track grade trends.
+{zerve_section}
 
 ---
-*Report generated by Aura CLI - Green Computing Auditor*
 """
 
     try:
-        with open('GREEN_AUDIT.md', 'w', encoding='utf-8') as f:
-            f.write(green_content)
+        # Persistent Green Journal: Append instead of overwrite
+        journal_header = f"""# 🌿 Green Journal - {os.path.basename(os.getcwd())}
+
+*Sustainability tracking for your codebase. Each audit is appended below.*
+
+"""
+        if os.path.exists('GREEN_AUDIT.md'):
+            # Append new entry to existing journal
+            with open('GREEN_AUDIT.md', 'a', encoding='utf-8') as f:
+                f.write(audit_entry)
+        else:
+            # Create new journal with header
+            with open('GREEN_AUDIT.md', 'w', encoding='utf-8') as f:
+                f.write(journal_header + audit_entry)
+        
         if not getattr(args, 'compact', False):
+            # Show progress panel
             console.print(Panel(
-                Text("✓ Sustainability report saved to GREEN_AUDIT.md", style="bright_green"),
+                Text(f"{progress_emoji} {progress_text}", style="bright_green"),
+                title="🌿 Sustainability Progress",
+                border_style="green",
+                padding=(0, 2)
+            ))
+            console.print(Panel(
+                Text("✓ Audit appended to GREEN_AUDIT.md", style="bright_green"),
                 border_style="green",
                 padding=(0, 2)
             ))
@@ -1087,11 +1389,233 @@ Generated on: {time.strftime('%Y-%m-%d %H:%M:%S')}
 
 
 def cmd_fly(args):
-    """Performance flight check subcommand."""
-    palette = ["bright_yellow", "yellow", "bright_magenta", "magenta", "bright_yellow"]
-    console.print(render_title_panel("AURA — FLY", palette, border_style="yellow"))
-    _print_live_panel("⚡ Benchmarking", "Running quick performance probes...", style="yellow", wait=1.2)
-    console.print("[bold yellow]Performance snapshot ready. Use `aura fly --help` for tuning options.[/bold yellow]")
+    """Agentic Onboarding - Automate the 'blank page' phase of development."""
+    theme = get_theme('fly')
+    
+    console.print(render_title_panel("◆ AURA — FLY ◆", 'fly'))
+    
+    project_type = getattr(args, 'project_type', None)
+    
+    # If no project type provided, show help
+    if not project_type:
+        console.print(Panel(
+            Text(
+                "✈️ Agentic Onboarding\n\n"
+                "Aura Fly automates project setup. Provide a project type:\n\n"
+                "  aura fly \"Next.js with Tailwind\"\n"
+                "  aura fly \"Python FastAPI\"\n"
+                "  aura fly \"React TypeScript\"\n"
+                "  aura fly \"Python Data Science API\"\n\n"
+                "Aura will generate and execute the setup commands for you.",
+                style=theme['text']
+            ),
+            title="🛫 Flight Plan Required",
+            border_style=theme['primary'],
+            padding=(1, 2)
+        ))
+        return
+    
+    console.print(Panel(
+        Text(f"Project Type: {project_type}", style=f"bold {theme['primary']}"),
+        title="✈️ Flight Plan",
+        border_style=theme['border'],
+        padding=(0, 2)
+    ))
+    
+    # AI Planning: Generate setup commands using Copilot CLI
+    loading_spinner = Spinner("dots", text=f"[{theme['primary']}]🚀 Consulting Copilot for setup commands...[/{theme['primary']}]")
+    commands = []
+    
+    with Live(loading_spinner, console=console, refresh_per_second=8, transient=True):
+        copilot_bin = shutil.which('copilot')
+        if not copilot_bin:
+            console.print(Panel(
+                Text("GitHub Copilot CLI not found. Install with: npm install -g @github/copilot", style="red"),
+                border_style="red",
+                padding=(1, 2)
+            ))
+            return
+        
+        prompt = (
+            f"The user wants to start a {project_type}. Generate a list of the 5 essential bash commands needed to "
+            f"initialize this project, install core dependencies, and create a README. "
+            f"Output ONLY the commands as a newline-separated list, no explanations or numbering."
+        )
+        
+        input_text = f"{prompt}\n/quit\n"
+        
+        try:
+            result = subprocess.run(
+                [copilot_bin],
+                input=input_text,
+                capture_output=True,
+                text=True,
+                timeout=90
+            )
+            
+            output = (result.stdout or "").strip()
+            
+            if output:
+                # Parse commands from output - filter out non-command lines
+                for line in output.split('\n'):
+                    line = line.strip()
+                    # Skip empty lines, comments, headers, and copilot metadata
+                    if not line:
+                        continue
+                    if line.startswith('#') or line.startswith('●') or line.startswith('└'):
+                        continue
+                    if 'Total usage' in line or 'API time' in line or 'session time' in line:
+                        continue
+                    if line.startswith('$'):
+                        line = line[1:].strip()  # Remove leading $
+                    # Check if it looks like a command
+                    if any(cmd in line.lower() for cmd in ['npm', 'npx', 'pip', 'python', 'mkdir', 'cd', 'git', 'touch', 'echo', 'cat', 'curl', 'wget', 'yarn', 'pnpm', 'cargo', 'go ', 'brew', 'apt']):
+                        commands.append(line)
+                    elif line.startswith('mkdir') or line.startswith('cd ') or line.startswith('echo '):
+                        commands.append(line)
+        except subprocess.TimeoutExpired:
+            console.print(Panel(
+                Text("Copilot timeout. Please try again.", style=theme['secondary']),
+                border_style=theme['secondary'],
+                padding=(1, 2)
+            ))
+            return
+        except Exception as e:
+            console.print(f"[{theme['secondary']}]⚠️  Copilot error: {str(e)[:50]}[/{theme['secondary']}]")
+            return
+    
+    # Limit to 5 commands
+    commands = commands[:5]
+    
+    if not commands:
+        console.print(Panel(
+            Text("Could not generate setup commands. Try a more specific project type.", style=theme['secondary']),
+            border_style=theme['secondary'],
+            padding=(1, 2)
+        ))
+        return
+    
+    # Safety & Confirmation: Display the plan
+    command_list = "\n".join(f"  {i+1}. {cmd}" for i, cmd in enumerate(commands))
+    console.print(Panel(
+        Text(f"Generated Flight Plan ({len(commands)} steps):\n\n{command_list}", style="cyan"),
+        title="🛫 Pre-Flight Checklist",
+        border_style=theme['border'],
+        box=box.ROUNDED,
+        padding=(1, 2)
+    ))
+    
+    console.print()
+    console.print(f"[bold {theme['primary']}]🚀 Aura is ready for takeoff.[/bold {theme['primary']}]")
+    
+    # Ask for explicit confirmation
+    try:
+        response = input("   Execute these commands? (y/n): ").strip().lower()
+    except (KeyboardInterrupt, EOFError):
+        console.print("\n[yellow]Flight cancelled.[/yellow]")
+        return
+    
+    if response != 'y':
+        console.print(Panel(
+            Text("✈️ Flight aborted. No changes made.", style=theme['text']),
+            border_style=theme['secondary'],
+            padding=(0, 2)
+        ))
+        return
+    
+    console.print()
+    console.print(Rule(style="dim"))
+    console.print(f"[bold {theme['primary']}]🛫 Initiating launch sequence...[/bold {theme['primary']}]\n")
+    
+    # Execution with Feedback - Interactive mode (output flows to terminal)
+    completed = 0
+    failed_steps = []
+    
+    for i, cmd in enumerate(commands):
+        step_num = i + 1
+        console.print(f"[bold cyan]Step {step_num}/{len(commands)}:[/bold cyan] {cmd}")
+        console.print()
+        
+        success = False
+        while not success:
+            try:
+                # Run command interactively - output flows directly to terminal
+                # Do not use capture_output so user can interact with prompts
+                exit_code = subprocess.call(cmd, shell=True, cwd=os.getcwd())
+                
+                if exit_code == 0:
+                    console.print(f"\n[green]✓ Step {step_num} completed[/green]\n")
+                    completed += 1
+                    success = True
+                else:
+                    console.print(f"\n[yellow]⚠️ Step {step_num} returned exit code {exit_code}[/yellow]")
+                    try:
+                        retry = input("   (R)etry, (S)kip, or (A)bort? ").strip().lower()
+                    except (KeyboardInterrupt, EOFError):
+                        console.print("\n[yellow]Flight aborted.[/yellow]")
+                        return
+                    
+                    if retry == 'r':
+                        console.print("[yellow]Retrying...[/yellow]\n")
+                        continue
+                    elif retry == 'a':
+                        console.print("[yellow]Flight aborted.[/yellow]")
+                        return
+                    else:  # Skip
+                        console.print(f"[yellow]Skipping step {step_num}[/yellow]\n")
+                        failed_steps.append((step_num, cmd))
+                        success = True  # Move to next
+                        
+            except Exception as e:
+                console.print(f"\n[red]✗ Error in step {step_num}: {str(e)[:50]}[/red]")
+                try:
+                    retry = input("   (R)etry, (S)kip, or (A)bort? ").strip().lower()
+                except (KeyboardInterrupt, EOFError):
+                    console.print("\n[yellow]Flight aborted.[/yellow]")
+                    return
+                
+                if retry == 'r':
+                    console.print("[yellow]Retrying...[/yellow]\n")
+                    continue
+                elif retry == 'a':
+                    console.print("[yellow]Flight aborted.[/yellow]")
+                    return
+                else:  # Skip
+                    console.print(f"[yellow]Skipping step {step_num}[/yellow]\n")
+                    failed_steps.append((step_num, cmd))
+                    success = True
+    
+    console.print(Rule(style="dim"))
+    
+    # Final status
+    if failed_steps:
+        skip_list = "\n".join(f"  • Step {s}: {c}" for s, c in failed_steps)
+        console.print(Panel(
+            Text(f"✈️ Flight completed with {len(failed_steps)} skipped step(s):\n\n{skip_list}", style=theme['secondary']),
+            title="🛬 Landing Report",
+            border_style=theme['secondary'],
+            padding=(1, 2)
+        ))
+    else:
+        console.print(Panel(
+            Text(f"✈️ All {completed} steps completed successfully!\n\nYour {project_type} project is ready.", style=theme['accent']),
+            title="🛬 Perfect Landing",
+            border_style=theme['accent'],
+            padding=(1, 2)
+        ))
+    
+    # Final Handover: Run aura story to document the project birth
+    console.print()
+    console.print("[bold blue]📖 Documenting project birth...[/bold blue]\n")
+    
+    try:
+        # Create a simple args object for cmd_story
+        class StoryArgs:
+            pass
+        story_args = StoryArgs()
+        cmd_story(story_args)
+    except Exception as e:
+        console.print(f"[yellow]⚠️ Could not generate story: {str(e)[:50]}[/yellow]")
 
 
 
@@ -1171,11 +1695,13 @@ Examples:
     eco_parser.set_defaults(func=cmd_eco)
     
     # Performance flight check command
-    subparsers.add_parser(
+    fly_parser = subparsers.add_parser(
         'fly',
-        help='Run performance and optimization analysis',
-        aliases=['perf']
-    ).set_defaults(func=cmd_fly)
+        help='Agentic Onboarding - Automate project setup',
+        aliases=['perf', 'init']
+    )
+    fly_parser.add_argument('project_type', nargs='?', default=None, help='Project type (e.g., "Next.js with Tailwind", "Python FastAPI")')
+    fly_parser.set_defaults(func=cmd_fly)
     
     args = parser.parse_args()
     

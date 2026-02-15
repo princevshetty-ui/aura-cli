@@ -7,7 +7,7 @@
 - **Check** (🛡️) - Security vulnerability and secret scanning
 - **Pulse** (💓) - Productivity analysis and wellness suggestions  
 - **Story** (📖) - Code documentation generation
-- **Eco** (🌍) - Dependency and ecosystem analysis
+- **Eco** (🌍) - Green computing and sustainability audit
 - **Fly** (🚀) - Performance optimization checks
 
 ---
@@ -156,14 +156,16 @@ python3 aura.py doc                 # Alias
 
 ---
 
-### 4. **Aura Eco** - Dependency Analysis
+### 4. **Aura Eco** - Green Computing Audit
 
-**Purpose**: Check dependencies, find outdated packages, and security patches.
+**Purpose**: Scan for filesystem bloat, assess algorithmic complexity, and generate a sustainability report.
 
 #### Usage
 ```bash
-python3 aura.py eco                 # Run dependency check
+python3 aura.py eco                 # Run green computing audit
 python3 aura.py deps                # Alias
+
+# Generates GREEN_AUDIT.md with the findings
 ```
 
 ---

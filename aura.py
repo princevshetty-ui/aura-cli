@@ -467,15 +467,15 @@ def get_git_diff(lines: int = 40) -> str:
     return ""
 
 
-def scan_bloat(max_size_mb: int = 50):
-    """Scan for bloated files and directories.
+def scan_bloat(max_size_mb: int = 50, top_n: int = 5):
+    """Scan for the largest files and flag energy-heavy assets.
 
     Returns:
-        (large_files, large_dirs, total_bloat_mb)
+        (largest_files, total_bloat_mb)
+        where largest_files = [(path, size_mb, impact_label), ...]
     """
-    large_files = []
-    large_dirs = {}
     exclude_dirs = {'.git', 'node_modules', '.venv', '__pycache__', '.pytest_cache', 'site-packages'}
+    file_sizes = []
 
     for root, dirs, files in os.walk('.'):
         dirs[:] = [d for d in dirs if d not in exclude_dirs]
@@ -483,101 +483,105 @@ def scan_bloat(max_size_mb: int = 50):
             fpath = os.path.join(root, file)
             try:
                 size_bytes = os.path.getsize(fpath)
-                size_mb = size_bytes / (1024 * 1024)
-                if size_mb > max_size_mb:
-                    large_files.append((fpath, size_mb))
             except Exception:
                 continue
+            size_mb = size_bytes / (1024 * 1024)
+            file_sizes.append((fpath, size_mb))
 
-    for d in ['node_modules', '.venv', '__pycache__', '.pytest_cache', 'site-packages']:
-        if os.path.isdir(d):
-            try:
-                size_bytes = sum(os.path.getsize(os.path.join(dirpath, f))
-                                 for dirpath, _, files in os.walk(d) for f in files)
-                size_mb = size_bytes / (1024 * 1024)
-                large_dirs[d] = size_mb
-            except Exception:
-                continue
+    file_sizes.sort(key=lambda item: item[1], reverse=True)
+    largest_files = []
+    for fpath, size_mb in file_sizes[:top_n]:
+        if size_mb > max_size_mb:
+            impact = "Energy Heavy — prune or add to .gitignore"
+        else:
+            impact = "OK"
+        largest_files.append((fpath, size_mb, impact))
 
-    total_bloat_mb = sum(size for _, size in large_files) + sum(large_dirs.values())
-    return large_files, large_dirs, total_bloat_mb
+    total_bloat_mb = sum(size for _, size, _ in largest_files)
+    return largest_files, total_bloat_mb
 
 
-def analyze_complexity_with_copilot(main_script: str = "aura.py") -> str:
-    """Send main script to Copilot for complexity analysis."""
+def analyze_complexity_with_copilot(main_script: str = "aura.py", snippet_lines: int = 40) -> str:
+    """Send a short main-script snippet to Copilot for complexity analysis."""
     try:
         if not os.path.exists(main_script):
             return "Main script not found. Skipping complexity analysis."
 
         with open(main_script, 'r', encoding='utf-8') as f:
-            content = f.read(5000)
+            lines = f.read().splitlines()
+
+        snippet = "\n".join(lines[:snippet_lines])
+        if not snippet.strip():
+            return "Main script is empty. Skipping complexity analysis."
+
+        if not check_copilot_auth():
+            return "Copilot CLI not authenticated. Run: copilot -i /login"
 
         copilot_bin = shutil.which('copilot')
         if not copilot_bin:
             return "Copilot binary not found. Skipping AI analysis."
 
         prompt = (
-            "Analyze this Python code for algorithmic complexity and CPU-intensive patterns. "
-            "Provide a Big O notation score and a Carbon-Neutral refactor suggestion in 2-3 sentences. "
-            "Be brief and technical.\n\n"
-            f"Code snippet:\n{content[:2000]}"
+            "Analyze this code for algorithmic complexity (Big O). Identify nested loops or redundant I/O that "
+            "cause high CPU spikes. Suggest one Carbon-Neutral refactor to reduce energy consumption.\n\n"
+            f"Code snippet (first {snippet_lines} lines):\n{snippet}"
         )
 
-        result = subprocess.run(
-            [copilot_bin, "-p", prompt],
-            capture_output=True, text=True, timeout=30
-        )
+        def run_prompt(prompt_text: str, timeout_sec: int) -> str | None:
+            result = subprocess.run(
+                [copilot_bin, "-p", prompt_text],
+                capture_output=True, text=True, timeout=timeout_sec
+            )
+            if result.returncode == 0 and result.stdout:
+                return result.stdout.strip()
+            return None
 
-        if result.returncode == 0 and result.stdout:
-            return result.stdout.strip()
-        return "Copilot analysis unavailable. Using default assessment."
+        response = run_prompt(prompt, 15)
+        if response:
+            return response
+
+        # Retry quickly with a shorter snippet to reduce latency under load.
+        short_lines = max(10, snippet_lines // 2)
+        short_snippet = "\n".join(lines[:short_lines])
+        short_prompt = (
+            "Analyze this code for algorithmic complexity (Big O). Identify nested loops or redundant I/O that "
+            "cause high CPU spikes. Suggest one Carbon-Neutral refactor to reduce energy consumption.\n\n"
+            f"Code snippet (first {short_lines} lines):\n{short_snippet}"
+        )
+        response = run_prompt(short_prompt, 15)
+        if response:
+            return response
+
+        return "Copilot analysis unavailable. Defaulting to O(n) complexity."
     except subprocess.TimeoutExpired:
-        return "Analysis timeout (30s exceeded). Copilot may be busy or unavailable."
+        return "Analysis timeout (15s exceeded). Defaulting to O(n) complexity."
     except Exception as e:
-        return f"Analysis error: {str(e)[:50]}. Using fallback assessment."
+        return f"Analysis error: {str(e)[:50]}. Defaulting to O(n) complexity."
 
 
-def calculate_carbon_score(large_files: list, large_dirs: dict, complexity_feedback: str) -> str:
+def calculate_carbon_score(largest_files: list, complexity_feedback: str) -> str:
     """Calculate carbon efficiency score A-F based on bloat and complexity."""
-    score_points = 0
-    total_bloat_mb = sum(size for _, size in large_files) + sum(large_dirs.values())
+    feedback = (complexity_feedback or "").lower()
+    heavy_files = [entry for entry in largest_files if entry[1] > 50]
+    total_bloat_mb = sum(size for _, size, _ in largest_files)
+    several_large_assets = len(heavy_files) >= 2
+    major_bloat = len(heavy_files) >= 3 or total_bloat_mb >= 200 or any(size >= 200 for _, size, _ in heavy_files)
 
-    if total_bloat_mb == 0:
-        score_points += 40
-    elif total_bloat_mb < 100:
-        score_points += 30
-    elif total_bloat_mb < 500:
-        score_points += 20
-    elif total_bloat_mb < 1000:
-        score_points += 10
+    nested_loops = "nested loop" in feedback or "nested loops" in feedback
+    quadratic = "o(n^2" in feedback or "o(n²" in feedback or "quadratic" in feedback
+    linear = "o(n)" in feedback or "linear" in feedback or "o(n log" in feedback
+    constant = "o(1" in feedback or "constant" in feedback
+    log_n = "o(log" in feedback
 
-    dir_count = len(large_dirs)
-    if dir_count == 0:
-        score_points += 30
-    elif dir_count == 1:
-        score_points += 20
-    elif dir_count == 2:
-        score_points += 10
-
-    if "O(1)" in complexity_feedback:
-        score_points += 30
-    elif "O(n)" in complexity_feedback:
-        score_points += 20
-    elif "O(n^2" in complexity_feedback or "O(n²" in complexity_feedback:
-        score_points += 10
-
-    percentage = (score_points / 100) * 100
-    if percentage >= 90:
-        return "A"
-    if percentage >= 80:
-        return "B"
-    if percentage >= 70:
+    if nested_loops and major_bloat:
+        return "F"
+    if quadratic or several_large_assets:
         return "C"
-    if percentage >= 60:
+    if (constant or log_n or linear) and not heavy_files:
+        return "A"
+    if nested_loops or heavy_files:
         return "D"
-    if percentage >= 50:
-        return "E"
-    return "F"
+    return "B"
 
 
 def cmd_check(args):
@@ -930,15 +934,15 @@ def cmd_eco(args):
 
     # Scan for bloat with loading indicator
     if getattr(args, 'compact', False):
-        large_files, large_dirs, total_bloat = scan_bloat()
+        largest_files, total_bloat = scan_bloat()
     else:
         loading_spinner = Spinner("dots", text="[green]Scanning filesystem for bloat...[/green]")
         with Live(loading_spinner, console=console, refresh_per_second=8, transient=True):
-            large_files, large_dirs, total_bloat = scan_bloat()
+            largest_files, total_bloat = scan_bloat()
 
     # Analyze complexity with Copilot (skip if --no-ai flag)
     if getattr(args, 'no_ai', False):
-        complexity_feedback = "Complexity analysis skipped (--no-ai flag used). O(n) assumed for average case."
+        complexity_feedback = "AI complexity audit skipped (--no-ai flag used). Local assumption: O(n) patterns."
     else:
         if getattr(args, 'compact', False):
             complexity_feedback = analyze_complexity_with_copilot()
@@ -947,52 +951,32 @@ def cmd_eco(args):
             with Live(loading_spinner, console=console, refresh_per_second=8, transient=True):
                 complexity_feedback = analyze_complexity_with_copilot()
 
-    carbon_score = calculate_carbon_score(large_files, large_dirs, complexity_feedback)
+    carbon_score = calculate_carbon_score(largest_files, complexity_feedback)
+    heavy_files = [entry for entry in largest_files if entry[1] > 50]
+    total_bloat_text = f"{total_bloat:.1f} MB" if total_bloat > 0 else "0 MB"
+
     table_width = max(72, console.width - 6)
     table = Table(
-        title="🌿 Carbon Audit",
-        border_style="green",
-        box=box.SQUARE,
+        border_style="bright_green",
+        box=box.SIMPLE_HEAVY,
         show_header=True,
-        header_style="bold green",
+        header_style="bold bright_green",
         show_lines=False,
         expand=False,
         pad_edge=False,
         width=table_width
     )
 
-    # Fixed ratios within a constrained width to keep borders aligned
-    table.add_column("Metric", style="cyan", ratio=1, no_wrap=True)
-    table.add_column("Status", style="white", ratio=2, no_wrap=True, overflow="ellipsis")
+    table.add_column("File", style="cyan", ratio=2, no_wrap=True, overflow="ellipsis")
+    table.add_column("Size", style="white", ratio=1, justify="right")
+    table.add_column("Energy Impact", style="bright_green", ratio=2, overflow="ellipsis")
 
-    if large_files:
-        file_summary = f"{len(large_files)} file(s) > 50MB"
-        table.add_row("Bloat Files", f"⚠️  {file_summary}")
+    if largest_files:
+        for fpath, size_mb, impact in largest_files:
+            rel_path = os.path.relpath(fpath, start='.')
+            table.add_row(rel_path, f"{size_mb:.2f} MB", impact)
     else:
-        table.add_row("Bloat Files", "✓ None detected")
-
-    if large_dirs:
-        dir_names = list(large_dirs.keys())[:2]
-        dir_display = ", ".join([os.path.basename(d) for d in dir_names])
-        if len(large_dirs) > 2:
-            remaining = len(large_dirs) - 2
-            dir_summary = f"⚠️  {len(large_dirs)} dirs: {dir_display} (+{remaining})"
-        else:
-            dir_summary = f"⚠️  {len(large_dirs)} dirs: {dir_display}"
-        table.add_row("Bloat Dirs", dir_summary)
-    else:
-        table.add_row("Bloat Dirs", "✓ Clean")
-
-    total_bloat_text = f"{total_bloat:.1f} MB" if total_bloat > 0 else "0 MB"
-    table.add_row("Total Bloat", f"📊 {total_bloat_text}")
-
-    if "O(1)" in complexity_feedback:
-        complexity_status = "✓ O(1) - Excellent"
-    elif "O(n)" in complexity_feedback:
-        complexity_status = "⚠️  O(n) - Good"
-    else:
-        complexity_status = "⚠️  Needs analysis"
-    table.add_row("Algorithmic Complexity", complexity_status)
+        table.add_row("No files found", "-", "-")
 
     score_colors = {
         "A": "bold bright_green",
@@ -1003,18 +987,34 @@ def cmd_eco(args):
         "F": "bold bright_red"
     }
     score_style = score_colors.get(carbon_score, "bold white")
-    table.add_row("Carbon Efficiency Score", Text(carbon_score, style=score_style))
+
+    summary = Group(
+        Text(f"Carbon Grade: {carbon_score}", style=score_style),
+        Text(f"Energy Heavy files (>50MB): {len(heavy_files)}", style="white"),
+        Text(f"Total size (top {len(largest_files)} files): {total_bloat_text}", style="white"),
+        Rule(style="dim"),
+        table
+    )
 
     if getattr(args, 'compact', False):
         print(json.dumps({
-            "carbon_score": carbon_score,
-            "total_bloat_mb": round(total_bloat, 1),
-            "large_files": len(large_files),
-            "bloated_dirs": len(large_dirs)
+            "carbon_grade": carbon_score,
+            "energy_heavy_files": len(heavy_files),
+            "total_top_files_mb": round(total_bloat, 1),
+            "largest_files": [
+                {"file": fpath, "size_mb": round(size_mb, 2), "impact": impact}
+                for fpath, size_mb, impact in largest_files
+            ]
         }, separators=(",", ":")))
     else:
         console.print(Rule(style="dim"))
-        console.print(table)
+        console.print(Panel(
+            summary,
+            title="🌿 Eco Audit",
+            border_style="bright_green",
+            box=box.ROUNDED,
+            padding=(1, 2)
+        ))
 
         if complexity_feedback:
             if any(term in complexity_feedback.lower() for term in ["timeout", "error", "not found", "unavailable"]):
@@ -1031,57 +1031,59 @@ def cmd_eco(args):
                     padding=(1, 2)
                 ))
 
-    # Generate GREEN.md documentation
+    # Generate GREEN_AUDIT.md documentation
+    heavy_file_lines = "\n".join(
+        [f"- {fpath} ({size_mb:.2f} MB) — {impact}" for fpath, size_mb, impact in largest_files if size_mb > 50]
+    )
+    if not heavy_file_lines:
+        heavy_file_lines = "✓ No energy-heavy files detected"
+
+    table_lines = "\n".join(
+        [f"| {fpath} | {size_mb:.2f} MB | {impact} |" for fpath, size_mb, impact in largest_files]
+    ) or "| No files found | - | - |"
+
     green_content = f"""# 🌿 Carbon Audit Report - {os.path.basename(os.getcwd())}
 
-## Carbon Efficiency Score: {carbon_score}
+## Carbon Grade: {carbon_score}
 
 Generated on: {time.strftime('%Y-%m-%d %H:%M:%S')}
 
-### Bloat Analysis
+### Static Bloat Scan (Top 5 Largest Files)
 
-**Large Files (>50MB):**
-{f"- {chr(10).join([f'{file}: {size:.2f} MB' for file, size in large_files[:10]])}" if large_files else "✓ No large files detected"}
+| File | Size | Energy Impact |
+| --- | --- | --- |
+{table_lines}
 
-**Bloated Directories:**
-{f"- {chr(10).join([f'{dir}: {size:.2f} MB' for dir, size in list(large_dirs.items())[:10]])}" if large_dirs else "✓ No bloated directories found"}
+**Energy Heavy (>50MB):**
+{heavy_file_lines}
 
-**Total Bloat:** {total_bloat:.1f} MB
+**Total Size (Top {len(largest_files)} files):** {total_bloat_text}
 
-### Complexity Analysis
+### AI Complexity Audit
 
 {complexity_feedback}
 
 ### Recommendations
 
-1. **File Management**: Consider removing or compressing files over 50MB
-2. **Directory Cleanup**: Archive or remove node_modules and .venv before deployment
-3. **Code Optimization**: Implement the refactoring suggestions above
-4. **Monitoring**: Track carbon score in your CI/CD pipeline
-
-### Carbon Score Legend
-
-- **A**: Excellent (≥90% efficiency)
-- **B**: Good (≥80% efficiency)
-- **C**: Average (≥70% efficiency)
-- **D**: Below Average (≥60% efficiency)
-- **E**: Poor (≥50% efficiency)
-- **F**: Critical (<50% efficiency)
+1. **Prune or ignore heavy assets**: Move large artifacts to archives or add them to `.gitignore`.
+2. **Refactor hotspots**: Apply the AI-suggested refactor to reduce CPU spikes.
+3. **Monitor sustainability**: Run `aura eco` regularly and track grade trends.
 
 ---
-*Report generated by Aura CLI - Carbon Efficiency Auditor*
+*Report generated by Aura CLI - Green Computing Auditor*
 """
 
     try:
-        with open('GREEN.md', 'w') as f:
+        with open('GREEN_AUDIT.md', 'w', encoding='utf-8') as f:
             f.write(green_content)
-        console.print(Panel(
-            Text("✓ Carbon audit report saved to GREEN.md", style="bright_green"),
-            border_style="green",
-            padding=(0, 2)
-        ))
+        if not getattr(args, 'compact', False):
+            console.print(Panel(
+                Text("✓ Sustainability report saved to GREEN_AUDIT.md", style="bright_green"),
+                border_style="green",
+                padding=(0, 2)
+            ))
     except Exception as e:
-        console.print(f"[yellow]⚠️  Could not save GREEN.md: {str(e)[:50]}[/yellow]")
+        console.print(f"[yellow]⚠️  Could not save GREEN_AUDIT.md: {str(e)[:50]}[/yellow]")
 
 
 def cmd_fly(args):

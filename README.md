@@ -79,8 +79,8 @@ python3 aura.py story
 python3 aura.py doc  # Alias
 ```
 
-### 4. 🌍 **ECO** - Dependencies
-Analyze project dependencies and find updates.
+### 4. 🌍 **ECO** - Green Computing Audit
+Run a sustainability audit for bloat and algorithmic complexity, producing a `GREEN_AUDIT.md` report.
 
 ```bash
 python3 aura.py eco

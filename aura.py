@@ -13,11 +13,13 @@ import shutil
 from rich.console import Console, Group
 import json
 from rich.panel import Panel
+from rich import box
 from rich.table import Table
 from rich.layout import Layout
 from rich.text import Text
 from rich.spinner import Spinner
 from rich.live import Live
+from rich.rule import Rule
 import time
 from collections import Counter
 from rich.progress import Progress, BarColumn, TextColumn, TimeRemainingColumn, SpinnerColumn
@@ -30,9 +32,24 @@ HEADER_STEP_WAIT = 0.8  # seconds per header step
 LIVE_PANEL_WAIT_DEFAULT = 1.0  # default wait for live panels
 
 
+def render_title_panel(label: str, palette: list[str], border_style: str):
+    """Render a centered, animated title panel with a color palette."""
+    from rich.align import Align
+
+    title_text = Text()
+    for i, ch in enumerate(label):
+        title_text.append(ch, style=palette[i % len(palette)])
+    return Panel(
+        Align(title_text, align="center"),
+        border_style=border_style,
+        padding=(1, 2),
+        box=box.ROUNDED
+    )
+
+
 def display_header():
-    """Display the AURA CLI header with bold purple styling and animation."""
-    # Animated header with initialization animation (slower for visibility)
+    """Display the AURA CLI header with bold styling and animation."""
+    # Animated header with initialization animation
     steps = [
         "✨ Initializing Aura...",
         "🔌 Loading modules...",
@@ -40,13 +57,14 @@ def display_header():
         "✅ Ready"
     ]
 
-    # Show each step briefly so the initialization doesn't 'pop' away instantly
+    # Show each step briefly
     for step in steps:
         with console.status(f"[bold magenta]{step}[/bold magenta]", spinner="dots"):
             time.sleep(HEADER_STEP_WAIT)
 
-    header_text = Text("✨ AURA CLI ✨", style="bold magenta", justify="center")
-    panel = Panel(header_text, border_style="magenta", padding=(0, 2), expand=False)
+    # Main headline (consistent with command headers)
+    palette = ["bright_magenta", "magenta", "bright_blue", "blue", "bright_magenta"]
+    panel = render_title_panel("✨ AURA CLI ✨", palette, border_style="magenta")
     console.print(panel)
 
 
@@ -221,6 +239,161 @@ def render_activity_histogram(mtimes, now, hours=6, buckets=6, width=24):
     return lines
 
 
+def play_sound(kind: str = "bell"):
+    """Try to play a simple notification sound.
+
+    Fallbacks (in order): terminal bell, paplay/aplay/spd-say where available.
+    This is best-effort and never raises.
+    """
+    try:
+        # Terminal bell (works in many terminals)
+        print('\a', end='', flush=True)
+    except Exception:
+        pass
+
+
+def parse_idle_field_to_minutes(field: str) -> float:
+    """Parse idle time field from `w`/`who` into minutes.
+
+    Handles formats like '.', 'old', '0.00s', '1.23m', 'MM:SS' or 'HH:MM'.
+    Returns minutes as float or None if unparsable.
+    """
+    if not field or field.strip() in (".", "", "?"):
+        return 0.0
+    f = field.strip()
+    if f == 'old':
+        return 24 * 60.0
+    # seconds
+    if f.endswith('s'):
+        try:
+            return float(f[:-1]) / 60.0
+        except Exception:
+            return None
+    # minutes
+    if f.endswith('m'):
+        try:
+            return float(f[:-1])
+        except Exception:
+            return None
+    # colon separated, could be mm:ss or hh:mm
+    if ':' in f:
+        parts = f.split(':')
+        try:
+            if len(parts) == 2:
+                a, b = int(parts[0]), int(parts[1])
+                # heuristics: if a < 10 assume minutes:seconds, else hours:minutes
+                if a < 10:
+                    return a + b / 60.0
+                return a * 60 + b
+        except Exception:
+            return None
+    # plain number -> minutes
+    try:
+        return float(f)
+    except Exception:
+        return None
+
+
+def get_terminal_idle_minutes() -> float | None:
+    """Try to determine the idle minutes for the current terminal session.
+
+    Returns minutes as float, or None if it cannot be determined.
+    """
+    # Try to get tty name
+    try:
+        tty = os.ttyname(sys.stdin.fileno())
+    except Exception:
+        tty = None
+
+    # Try `w -hs` first (more standardized)
+    try:
+        w_out = subprocess.run(['w', '-hs'], capture_output=True, text=True, timeout=1)
+        if w_out.returncode == 0 and w_out.stdout:
+            lines = [l for l in w_out.stdout.splitlines() if l.strip()]
+            for line in lines:
+                parts = line.split()
+                # USER TTY FROM LOGIN@ IDLE JCPU PCPU WHAT
+                if len(parts) >= 5:
+                    user = parts[0]
+                    tty_field = parts[1]
+                    idle_field = parts[4]
+                    if tty and tty_field in tty:
+                        m = parse_idle_field_to_minutes(idle_field)
+                        if m is not None:
+                            return m
+            # fallback: try to find any line for current user
+            cur_user = os.getenv('USER') or os.getlogin()
+            for line in lines:
+                parts = line.split()
+                if parts and parts[0] == cur_user and len(parts) >= 5:
+                    m = parse_idle_field_to_minutes(parts[4])
+                    if m is not None:
+                        return m
+    except Exception:
+        pass
+
+    # Try `who -u` as fallback
+    try:
+        who_out = subprocess.run(['who', '-u'], capture_output=True, text=True, timeout=1)
+        if who_out.returncode == 0 and who_out.stdout:
+            lines = [l for l in who_out.stdout.splitlines() if l.strip()]
+            for line in lines:
+                parts = line.split()
+                # USER TTY  ... IDLE
+                if len(parts) >= 6:
+                    tty_field = parts[1]
+                    idle_field = parts[5]
+                    if tty and tty_field in tty:
+                        m = parse_idle_field_to_minutes(idle_field)
+                        if m is not None:
+                            return m
+            # fallback: try matching current user
+            cur_user = os.getenv('USER') or os.getlogin()
+            for line in lines:
+                parts = line.split()
+                if parts and parts[0] == cur_user and len(parts) >= 6:
+                    m = parse_idle_field_to_minutes(parts[5])
+                    if m is not None:
+                        return m
+    except Exception:
+        pass
+
+    return None
+
+    # Try system players if available
+    try:
+        # prefer paplay (PulseAudio)
+        paplay = shutil.which('paplay')
+        if paplay:
+            # common freedesktop sounds
+            candidates = [
+                '/usr/share/sounds/freedesktop/stereo/complete.oga',
+                '/usr/share/sounds/freedesktop/stereo/phone-incoming-call.oga',
+            ]
+            for c in candidates:
+                if os.path.exists(c):
+                    subprocess.run([paplay, c], timeout=3)
+                    return
+
+        aplay = shutil.which('aplay')
+        if aplay:
+            # try a common wav (rare), fallback to bell
+            candidates = ['/usr/share/sounds/alsa/Front_Center.wav']
+            for c in candidates:
+                if os.path.exists(c):
+                    subprocess.run([aplay, c], timeout=3)
+                    return
+
+        # As a last resort, use spd-say to speak a short phrase
+        spd = shutil.which('spd-say')
+        if spd:
+            phrase = 'Time for a short break' if kind != 'bell' else 'Bell'
+            subprocess.run([spd, phrase], timeout=3)
+            return
+    except Exception:
+        pass
+
+
 def animate_flame(duration: float = 1.0, refresh: int = 8, loop: bool = False, enabled: bool = True):
     """Render a brief flame animation using Rich Live. Non-blocking-ish and
     transient so it feels like a tasteful visual flourish for FLOW state.
@@ -242,11 +415,39 @@ def animate_flame(duration: float = 1.0, refresh: int = 8, loop: bool = False, e
     with Live(refresh_per_second=refresh, transient=True) as live:
         if loop:
             end = time.time() + duration
-            while time.time() < end:
-                for frame in frames:
-                    panel = Panel(Align(frame, vertical="middle"), border_style="bright_red", title="FLOW")
-                    live.update(panel)
-                    time.sleep(max(0.02, duration / (len(frames) * 4)))
+            # Loop until duration expires or until a keypress (if stdin is a tty)
+            end = time.time() + duration
+            try:
+                # set up non-blocking key detection
+                import termios
+                import tty
+                import select
+
+                fd = sys.stdin.fileno()
+                old_settings = termios.tcgetattr(fd)
+                try:
+                    tty.setcbreak(fd)
+                    while time.time() < end:
+                        for frame in frames:
+                            panel = Panel(Align(frame, vertical="middle"), border_style="bright_red", title="FLOW")
+                            live.update(panel)
+                            # check for keypress
+                            if select.select([sys.stdin], [], [], duration / (len(frames) * 4))[0]:
+                                _ = sys.stdin.read(1)
+                                return
+                            time.sleep(max(0.02, duration / (len(frames) * 4)))
+                finally:
+                    try:
+                        termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+                    except Exception:
+                        pass
+            except Exception:
+                # Fallback: loop until time expires without key detection
+                while time.time() < end:
+                    for frame in frames:
+                        panel = Panel(Align(frame, vertical="middle"), border_style="bright_red", title="FLOW")
+                        live.update(panel)
+                        time.sleep(max(0.02, duration / (len(frames) * 4)))
         else:
             for frame in frames:
                 panel = Panel(Align(frame, vertical="middle"), border_style="bright_red", title="FLOW")
@@ -254,14 +455,141 @@ def animate_flame(duration: float = 1.0, refresh: int = 8, loop: bool = False, e
                 time.sleep(max(0.02, duration / len(frames)))
 
 
+def get_git_diff(lines: int = 40) -> str:
+    """Fetch recent git diff to understand code changes."""
+    try:
+        result = subprocess.run(['git', 'diff', 'HEAD'], capture_output=True, text=True, timeout=5)
+        if result.returncode == 0 and result.stdout:
+            output_lines = result.stdout.splitlines()[:lines]
+            return '\n'.join(output_lines)
+    except Exception:
+        pass
+    return ""
+
+
+def scan_bloat(max_size_mb: int = 50):
+    """Scan for bloated files and directories.
+
+    Returns:
+        (large_files, large_dirs, total_bloat_mb)
+    """
+    large_files = []
+    large_dirs = {}
+    exclude_dirs = {'.git', 'node_modules', '.venv', '__pycache__', '.pytest_cache', 'site-packages'}
+
+    for root, dirs, files in os.walk('.'):
+        dirs[:] = [d for d in dirs if d not in exclude_dirs]
+        for file in files:
+            fpath = os.path.join(root, file)
+            try:
+                size_bytes = os.path.getsize(fpath)
+                size_mb = size_bytes / (1024 * 1024)
+                if size_mb > max_size_mb:
+                    large_files.append((fpath, size_mb))
+            except Exception:
+                continue
+
+    for d in ['node_modules', '.venv', '__pycache__', '.pytest_cache', 'site-packages']:
+        if os.path.isdir(d):
+            try:
+                size_bytes = sum(os.path.getsize(os.path.join(dirpath, f))
+                                 for dirpath, _, files in os.walk(d) for f in files)
+                size_mb = size_bytes / (1024 * 1024)
+                large_dirs[d] = size_mb
+            except Exception:
+                continue
+
+    total_bloat_mb = sum(size for _, size in large_files) + sum(large_dirs.values())
+    return large_files, large_dirs, total_bloat_mb
+
+
+def analyze_complexity_with_copilot(main_script: str = "aura.py") -> str:
+    """Send main script to Copilot for complexity analysis."""
+    try:
+        if not os.path.exists(main_script):
+            return "Main script not found. Skipping complexity analysis."
+
+        with open(main_script, 'r', encoding='utf-8') as f:
+            content = f.read(5000)
+
+        copilot_bin = shutil.which('copilot')
+        if not copilot_bin:
+            return "Copilot binary not found. Skipping AI analysis."
+
+        prompt = (
+            "Analyze this Python code for algorithmic complexity and CPU-intensive patterns. "
+            "Provide a Big O notation score and a Carbon-Neutral refactor suggestion in 2-3 sentences. "
+            "Be brief and technical.\n\n"
+            f"Code snippet:\n{content[:2000]}"
+        )
+
+        result = subprocess.run(
+            [copilot_bin, "-p", prompt],
+            capture_output=True, text=True, timeout=30
+        )
+
+        if result.returncode == 0 and result.stdout:
+            return result.stdout.strip()
+        return "Copilot analysis unavailable. Using default assessment."
+    except subprocess.TimeoutExpired:
+        return "Analysis timeout (30s exceeded). Copilot may be busy or unavailable."
+    except Exception as e:
+        return f"Analysis error: {str(e)[:50]}. Using fallback assessment."
+
+
+def calculate_carbon_score(large_files: list, large_dirs: dict, complexity_feedback: str) -> str:
+    """Calculate carbon efficiency score A-F based on bloat and complexity."""
+    score_points = 0
+    total_bloat_mb = sum(size for _, size in large_files) + sum(large_dirs.values())
+
+    if total_bloat_mb == 0:
+        score_points += 40
+    elif total_bloat_mb < 100:
+        score_points += 30
+    elif total_bloat_mb < 500:
+        score_points += 20
+    elif total_bloat_mb < 1000:
+        score_points += 10
+
+    dir_count = len(large_dirs)
+    if dir_count == 0:
+        score_points += 30
+    elif dir_count == 1:
+        score_points += 20
+    elif dir_count == 2:
+        score_points += 10
+
+    if "O(1)" in complexity_feedback:
+        score_points += 30
+    elif "O(n)" in complexity_feedback:
+        score_points += 20
+    elif "O(n^2" in complexity_feedback or "O(n²" in complexity_feedback:
+        score_points += 10
+
+    percentage = (score_points / 100) * 100
+    if percentage >= 90:
+        return "A"
+    if percentage >= 80:
+        return "B"
+    if percentage >= 70:
+        return "C"
+    if percentage >= 60:
+        return "D"
+    if percentage >= 50:
+        return "E"
+    return "F"
+
+
 def cmd_check(args):
     """Security check subcommand."""
-    console.print(Panel("[bold magenta]🛡️  Aura Security[/bold magenta]", border_style="magenta", padding=(0, 2)))
+    palette = ["bright_red", "red", "bright_magenta", "magenta", "bright_red"]
+    console.print(render_title_panel("AURA — SECURITY", palette, border_style="red"))
     
     # Pre-flight check: Verify Copilot CLI authentication
     if not check_copilot_auth():
         console.print("[bold red]⚠️  Aura needs your help![/bold red]")
-        console.print("Please run [bold cyan]Copilot -i /login[/bold cyan] to activate my AI core.\n")
+        console.print("Please run [bold cyan]copilot -i /login[/bold cyan] to authenticate the Copilot agent.\n")
+        console.print("Important: after running [bold cyan]copilot -i /login[/bold cyan], open a new terminal to run Aura commands. The Copilot login opens an agent that may occupy the current terminal and prevent Aura output from appearing in the same session.")
         return
 
     # Make scan feel more alive: brief live intro, then run scan with progress
@@ -362,16 +690,11 @@ def cmd_pulse(args):
     from rich.columns import Columns
     from rich.rule import Rule
 
-    # Polished title with PULSE-appropriate warm/calm palette
-    title_text = Text()
-    # Short, friendly title and calmer palette for PULSE
-    title_label = "AURA — PULSE"
-    palette = ["bright_cyan", "cyan", "bright_blue", "blue", "magenta"]
-    for i, ch in enumerate(title_label):
-        title_text.append(ch, style=palette[i % len(palette)])
+    # Polished title with PULSE-appropriate calm palette
+    palette = ["bright_cyan", "cyan", "bright_blue", "blue", "bright_cyan"]
 
     if not getattr(args, 'compact', False):
-        console.print(Panel(Align(title_text, align="center"), border_style="magenta", padding=(1, 2)))
+        console.print(render_title_panel("AURA — PULSE", palette, border_style="cyan"))
 
     _print_live_panel("Analyzing workspace", "Compiling activity signals...", style="cyan", wait=(0.8 if not getattr(args, 'compact', False) else 0))
 
@@ -465,69 +788,308 @@ def cmd_pulse(args):
 
     console.print(Columns([left, right], expand=True))
 
-    # Status / Call-to-action
+    # Determine idle state: check both file mtime and terminal idle
+    idle_threshold = float(getattr(args, 'idle', 15))
+    terminal_idle = get_terminal_idle_minutes()
+    idle_by_files = minutes_since > idle_threshold
+    idle_by_terminal = (terminal_idle is not None and terminal_idle > idle_threshold)
+    idle_by_force = getattr(args, 'force_zen', False)
+    is_idle = idle_by_files or idle_by_terminal or idle_by_force
+
+    # Build status message based on ACTUAL developer activity (minutes_since file edits)
     status_text = Text()
     if minutes_since < 5:
+        # FLOW: very recent activity (within 5 minutes) — show "In flow" only when truly active
         status_text.append("In flow — keep going!", style="bold bright_green")
         # tasteful looping flame animation for Flow (short loop). Skip in compact mode.
         if not getattr(args, 'compact', False):
             try:
-                celebrate = getattr(args, 'celebrate', False)
-                # default loop a short time for Flow; celebrate extends it
-                if celebrate:
-                    animate_flame(duration=8.0, loop=True, enabled=True)
-                else:
-                    animate_flame(duration=3.0, loop=True, enabled=True)
+                animate_flame(duration=3.0, loop=True, enabled=True)
             except Exception:
                 pass
     elif minutes_since <= 30:
+        # STEADY: moderate activity (5-30 minutes since last edit)
         status_text.append("STEADY RHYTHM — Good progress. Consider a brief checkpoint.", style="bold cyan")
     else:
-        status_text.append("AURA FADING — It's been a while since edits. Consider a micro-break or a short planning session.", style="bold yellow")
-
-    # If idle for >60m, optionally fetch a 1-minute guided stretch from Copilot
-    # Respect user's --no-ai flag: only fetch Copilot suggestion if not opted out
-    if minutes_since > 60 and not getattr(args, 'no_ai', False):
-        status_text.append("\n\nFetching a 1-minute stretch suggestion from Copilot...", style="dim")
-        stretch_text = "(no suggestion available)"
-        try:
-            copilot_bin = shutil.which('copilot')
-            if copilot_bin:
-                cp = subprocess.run([copilot_bin, "-p", "Suggest a 1-minute desk stretch for a developer"], capture_output=True, text=True, timeout=8)
-                stretch_text = (cp.stdout or cp.stderr or "").strip()
-            else:
-                stretch_text = "Install the Copilot CLI to enable guided micro-breaks."
-        except subprocess.TimeoutExpired:
-            stretch_text = "Copilot timed out. Try again later."
-        except Exception:
-            stretch_text = "Could not fetch suggestion."
-
-        console.print(Rule(style="dim"))
-        console.print(Panel(Text(stretch_text, style="white"), title="1-minute micro-break", border_style="yellow"))
+        # REST: low activity (30+ minutes since last edit) — time for a break
+        status_text.append("REST — It's been a while since edits. Take a micro-break.", style="bold yellow")
 
     console.print(Rule(style="dim"))
     console.print(Panel(status_text, border_style="green" if minutes_since < 30 else "yellow"))
 
+    # If idle (and not in compact mode and not opted out), fetch Copilot wellness suggestion
+    if is_idle and not getattr(args, 'compact', False) and not getattr(args, 'no_ai', False):
+        console.print(Rule(style="dim"))
+        
+        # Show "Fetching wellness suggestion..." while Copilot is working in background
+        loading_spinner = Spinner("dots", text="[cyan]Fetching wellness suggestion...[/cyan]")
+        with Live(loading_spinner, console=console, refresh_per_second=8, transient=True) as live:
+            copilot_bin = shutil.which('copilot')
+            stretch_text = None
+            error_occurred = False
+            
+            try:
+                if copilot_bin:
+                    # Fetch a 1-minute physical stretch with extended timeout (30s to be safe)
+                    # This gives Copilot plenty of time to respond without user seeing timeout
+                    cp = subprocess.run(
+                        [copilot_bin, "-p", "Suggest a 1-minute physical stretch for a developer. Format as a numbered list (3-4 steps)."],
+                        capture_output=True, text=True, timeout=30
+                    )
+                    stretch_text = (cp.stdout or cp.stderr or "").strip()
+                    if not stretch_text:
+                        stretch_text = "Take a moment to stretch and breathe. Stand up, move around, and reset your mind."
+                else:
+                    stretch_text = "Install the Copilot CLI to enable guided wellness breaks."
+            except subprocess.TimeoutExpired:
+                error_occurred = True
+                stretch_text = "Copilot is taking longer than expected. Please try again in a moment."
+            except Exception as e:
+                error_occurred = True
+                stretch_text = f"Could not fetch suggestion: {str(e)[:50]}"
+        
+        # Play a friendly sound to draw attention to the break
+        try:
+            play_sound('bell')
+        except Exception:
+            pass
+
+        # Show Zen Break panel with the suggestion
+        if stretch_text:
+            console.print(Panel(Text(stretch_text, style="white"), title="Zen Break 🧘", border_style="yellow"))
+            console.print(Panel(Text("🎧 Vibe Check: Open [link=https://lofi.co]Lofi.co[/link] for focus beats.", style="white"), border_style="bright_blue"))
+
 
 def cmd_story(args):
-    """Code story/documentation subcommand."""
-    console.print(Panel("[bold blue]📖 Aura Story[/bold blue]", border_style="blue"))
-    _print_live_panel("🧾 Generating", "Drafting code stories and docstrings...", style="blue", wait=1.1)
-    console.print("[bold blue]Documentation draft ready. Review and refine the suggestions above.[/bold blue]")
+    """Code story/documentation subcommand - Founder's Journal."""
+    palette = ["bright_blue", "blue", "cyan", "bright_cyan", "blue"]
+    console.print(render_title_panel("AURA — STORY", palette, border_style="blue"))
+
+    _print_live_panel("Analyzing changes", "Gathering recent code updates...", style="blue", wait=1.0)
+    git_diff = get_git_diff(lines=40)
+
+    if not git_diff:
+        console.print(Panel(
+            "[bold cyan]ℹ️  No code changes detected.[/bold cyan]\n\n"
+            "Tip: Make a change and commit to generate your Founder's Journal entry.",
+            border_style="cyan",
+            padding=(1, 2)
+        ))
+        return
+
+    loading_spinner = Spinner("dots", text="[blue]Composing your Founder's Journal...[/blue]")
+    journal_entry = None
+    with Live(loading_spinner, console=console, refresh_per_second=8, transient=True):
+        try:
+            copilot_bin = shutil.which('copilot')
+            if copilot_bin:
+                prompt = (
+                    "Based on these recent code changes, write a short, 3-sentence 'Founder's Journal' entry "
+                    "that explains the progress in a professional yet confident tone. Avoid technical jargon.\n\n"
+                    f"Code changes:\n{git_diff}"
+                )
+                cp = subprocess.run([copilot_bin, "-p", prompt], capture_output=True, text=True, timeout=30)
+                journal_entry = (cp.stdout or cp.stderr or "").strip()
+            if not journal_entry:
+                journal_entry = (
+                    "Today we made solid progress on the codebase. The team focused on quality and reliability, "
+                    "moving the project forward with clear, purposeful improvements."
+                )
+        except subprocess.TimeoutExpired:
+            journal_entry = (
+                "Progress is moving steadily. The team delivered meaningful updates and kept momentum strong."
+            )
+        except Exception:
+            journal_entry = (
+                "This session added thoughtful refinements and kept the project moving in the right direction."
+            )
+
+    # Clean the journal entry
+    clean_lines = [line for line in journal_entry.split('\n') if line.strip() and line.strip() != '---']
+    final_entry = '\n'.join(clean_lines).replace('**', '').strip()
+
+    console.print(Rule(style="dim"))
+    console.print(Panel(
+        Text(final_entry, style="white"),
+        title="📖 Today's Story",
+        border_style="blue",
+        padding=(1, 2)
+    ))
+    console.print(Panel(
+        Text("💭 Reflect on your progress and celebrate the small wins.", style="dim"),
+        border_style="blue",
+        padding=(0, 2)
+    ))
 
 
 def cmd_eco(args):
-    """Ecosystem analysis subcommand."""
-    console.print(Panel("[bold cyan]🌍 Aura Eco[/bold cyan]", border_style="cyan"))
-    _print_live_panel("🔗 Inspecting", "Checking dependency graph and outdated packages...", style="cyan", wait=1.0)
-    console.print("[bold cyan]Dependency analysis complete. See suggestions for upgrades and security patches.[/bold cyan]")
+    """Ecosystem analysis subcommand - Carbon audit."""
+    palette = ["bright_green", "green", "bright_cyan", "cyan", "bright_green"]
+    if not getattr(args, 'compact', False):
+        console.print(render_title_panel("AURA — ECO", palette, border_style="green"))
+
+    # Scan for bloat with loading indicator
+    if getattr(args, 'compact', False):
+        large_files, large_dirs, total_bloat = scan_bloat()
+    else:
+        loading_spinner = Spinner("dots", text="[green]Scanning filesystem for bloat...[/green]")
+        with Live(loading_spinner, console=console, refresh_per_second=8, transient=True):
+            large_files, large_dirs, total_bloat = scan_bloat()
+
+    # Analyze complexity with Copilot (skip if --no-ai flag)
+    if getattr(args, 'no_ai', False):
+        complexity_feedback = "Complexity analysis skipped (--no-ai flag used). O(n) assumed for average case."
+    else:
+        if getattr(args, 'compact', False):
+            complexity_feedback = analyze_complexity_with_copilot()
+        else:
+            loading_spinner = Spinner("dots", text="[green]Analyzing code complexity with AI...[/green]")
+            with Live(loading_spinner, console=console, refresh_per_second=8, transient=True):
+                complexity_feedback = analyze_complexity_with_copilot()
+
+    carbon_score = calculate_carbon_score(large_files, large_dirs, complexity_feedback)
+    table_width = max(72, console.width - 6)
+    table = Table(
+        title="🌿 Carbon Audit",
+        border_style="green",
+        box=box.SQUARE,
+        show_header=True,
+        header_style="bold green",
+        show_lines=False,
+        expand=False,
+        pad_edge=False,
+        width=table_width
+    )
+
+    # Fixed ratios within a constrained width to keep borders aligned
+    table.add_column("Metric", style="cyan", ratio=1, no_wrap=True)
+    table.add_column("Status", style="white", ratio=2, no_wrap=True, overflow="ellipsis")
+
+    if large_files:
+        file_summary = f"{len(large_files)} file(s) > 50MB"
+        table.add_row("Bloat Files", f"⚠️  {file_summary}")
+    else:
+        table.add_row("Bloat Files", "✓ None detected")
+
+    if large_dirs:
+        dir_names = list(large_dirs.keys())[:2]
+        dir_display = ", ".join([os.path.basename(d) for d in dir_names])
+        if len(large_dirs) > 2:
+            remaining = len(large_dirs) - 2
+            dir_summary = f"⚠️  {len(large_dirs)} dirs: {dir_display} (+{remaining})"
+        else:
+            dir_summary = f"⚠️  {len(large_dirs)} dirs: {dir_display}"
+        table.add_row("Bloat Dirs", dir_summary)
+    else:
+        table.add_row("Bloat Dirs", "✓ Clean")
+
+    total_bloat_text = f"{total_bloat:.1f} MB" if total_bloat > 0 else "0 MB"
+    table.add_row("Total Bloat", f"📊 {total_bloat_text}")
+
+    if "O(1)" in complexity_feedback:
+        complexity_status = "✓ O(1) - Excellent"
+    elif "O(n)" in complexity_feedback:
+        complexity_status = "⚠️  O(n) - Good"
+    else:
+        complexity_status = "⚠️  Needs analysis"
+    table.add_row("Algorithmic Complexity", complexity_status)
+
+    score_colors = {
+        "A": "bold bright_green",
+        "B": "bold green",
+        "C": "bold yellow",
+        "D": "bold bright_yellow",
+        "E": "bold red",
+        "F": "bold bright_red"
+    }
+    score_style = score_colors.get(carbon_score, "bold white")
+    table.add_row("Carbon Efficiency Score", Text(carbon_score, style=score_style))
+
+    if getattr(args, 'compact', False):
+        print(json.dumps({
+            "carbon_score": carbon_score,
+            "total_bloat_mb": round(total_bloat, 1),
+            "large_files": len(large_files),
+            "bloated_dirs": len(large_dirs)
+        }, separators=(",", ":")))
+    else:
+        console.print(Rule(style="dim"))
+        console.print(table)
+
+        if complexity_feedback:
+            if any(term in complexity_feedback.lower() for term in ["timeout", "error", "not found", "unavailable"]):
+                console.print(Panel(
+                    Text("🤖 AI Insights\n" + complexity_feedback + "\n\nUsing local assessment: O(n) complexity for filesystem operations.", style="dim yellow"),
+                    border_style="yellow",
+                    padding=(1, 2)
+                ))
+            else:
+                console.print(Panel(
+                    Text(complexity_feedback, style="white"),
+                    title="🤖 AI Insights",
+                    border_style="bright_green",
+                    padding=(1, 2)
+                ))
+
+    # Generate GREEN.md documentation
+    green_content = f"""# 🌿 Carbon Audit Report - {os.path.basename(os.getcwd())}
+
+## Carbon Efficiency Score: {carbon_score}
+
+Generated on: {time.strftime('%Y-%m-%d %H:%M:%S')}
+
+### Bloat Analysis
+
+**Large Files (>50MB):**
+{f"- {chr(10).join([f'{file}: {size:.2f} MB' for file, size in large_files[:10]])}" if large_files else "✓ No large files detected"}
+
+**Bloated Directories:**
+{f"- {chr(10).join([f'{dir}: {size:.2f} MB' for dir, size in list(large_dirs.items())[:10]])}" if large_dirs else "✓ No bloated directories found"}
+
+**Total Bloat:** {total_bloat:.1f} MB
+
+### Complexity Analysis
+
+{complexity_feedback}
+
+### Recommendations
+
+1. **File Management**: Consider removing or compressing files over 50MB
+2. **Directory Cleanup**: Archive or remove node_modules and .venv before deployment
+3. **Code Optimization**: Implement the refactoring suggestions above
+4. **Monitoring**: Track carbon score in your CI/CD pipeline
+
+### Carbon Score Legend
+
+- **A**: Excellent (≥90% efficiency)
+- **B**: Good (≥80% efficiency)
+- **C**: Average (≥70% efficiency)
+- **D**: Below Average (≥60% efficiency)
+- **E**: Poor (≥50% efficiency)
+- **F**: Critical (<50% efficiency)
+
+---
+*Report generated by Aura CLI - Carbon Efficiency Auditor*
+"""
+
+    try:
+        with open('GREEN.md', 'w') as f:
+            f.write(green_content)
+        console.print(Panel(
+            Text("✓ Carbon audit report saved to GREEN.md", style="bright_green"),
+            border_style="green",
+            padding=(0, 2)
+        ))
+    except Exception as e:
+        console.print(f"[yellow]⚠️  Could not save GREEN.md: {str(e)[:50]}[/yellow]")
 
 
 def cmd_fly(args):
     """Performance flight check subcommand."""
-    console.print(Panel("[bold magenta]🚀 Aura Fly[/bold magenta]", border_style="magenta"))
-    _print_live_panel("⚡ Benchmarking", "Running quick performance probes...", style="magenta", wait=1.2)
-    console.print("[bold magenta]Performance snapshot ready. Use `aura fly --help` for tuning options.[/bold magenta]")
+    palette = ["bright_yellow", "yellow", "bright_magenta", "magenta", "bright_yellow"]
+    console.print(render_title_panel("AURA — FLY", palette, border_style="yellow"))
+    _print_live_panel("⚡ Benchmarking", "Running quick performance probes...", style="yellow", wait=1.2)
+    console.print("[bold yellow]Performance snapshot ready. Use `aura fly --help` for tuning options.[/bold yellow]")
 
 
 
@@ -585,7 +1147,8 @@ Examples:
     pulse_parser.add_argument('--no-ai', action='store_true', help='Do not call Copilot for micro-break suggestions')
     pulse_parser.add_argument('--hours', type=int, default=6, help='Time window in hours for activity histogram (default: 6)')
     pulse_parser.add_argument('--compact', action='store_true', help='Compact output for CI/low-tty environments')
-    pulse_parser.add_argument('--celebrate', action='store_true', help='Enable longer/looping flame animation for Flow state')
+    pulse_parser.add_argument('--idle', type=int, default=15, help='Idle threshold in minutes to trigger Zen Break (default: 15)')
+    pulse_parser.add_argument('--force-zen', action='store_true', help='Force Zen Break (useful for testing)')
     pulse_parser.set_defaults(func=cmd_pulse)
     
     # Code story command
@@ -596,11 +1159,14 @@ Examples:
     ).set_defaults(func=cmd_story)
     
     # Ecosystem analysis command
-    subparsers.add_parser(
+    eco_parser = subparsers.add_parser(
         'eco',
         help='Analyze project dependencies and ecosystem',
         aliases=['deps']
-    ).set_defaults(func=cmd_eco)
+    )
+    eco_parser.add_argument('--no-ai', action='store_true', help='Skip Copilot analysis (faster)')
+    eco_parser.add_argument('--compact', action='store_true', help='Compact output for CI/automation')
+    eco_parser.set_defaults(func=cmd_eco)
     
     # Performance flight check command
     subparsers.add_parser(
